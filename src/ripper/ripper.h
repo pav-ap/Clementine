@@ -22,6 +22,7 @@
 
 #include <QMutex>
 #include <QObject>
+#include <QTimer>
 
 #include "core/song.h"
 #include "core/tagreaderclient.h"
@@ -40,7 +41,7 @@ class Ripper : public QObject {
   Q_OBJECT
 
  public:
-  explicit Ripper(CdIo_t* cdio, QObject* parent = nullptr);
+  explicit Ripper(int track_count, QObject* parent = nullptr);
   ~Ripper();
 
   // Adds a track to the rip list if the track number corresponds to a
@@ -48,7 +49,7 @@ class Ripper : public QObject {
   // chosen TranscoderPreset.
   void AddTrack(int track_number, const QString& title,
                 const QString& transcoded_filename,
-                const TranscoderPreset& preset);
+                const TranscoderPreset& preset, bool overwrite_existing);
   // Sets album metadata. This information is used when tagging the
   // final files.
   void SetAlbumInformation(const QString& album, const QString& artist,
@@ -60,12 +61,17 @@ class Ripper : public QObject {
   int AddedTracks() const;
   // Clears the rip list.
   void ClearTracks();
+  // Returns the current progress of the ripping process for all tracks as a
+  // floating point number between 0 and 1.
+  float GetProgress() const;
 
  signals:
+  // Emitted when the full process, i.e., ripping, transcoding and tagging, is
+  // completed or has failed.
   void Finished();
   void Cancelled();
-  void ProgressInterval(int min, int max);
-  void Progress(int progress);
+  // Emitted when ripping and transcoding files is completed, but files still
+  // need to be tagged.
   void RippingComplete();
 
  public slots:
@@ -73,7 +79,7 @@ class Ripper : public QObject {
   void Cancel();
 
  private slots:
-  void TranscodingJobComplete(const QString& input, const QString& output,
+  void TranscodingJobComplete(const QUrl& input, const QString& output,
                               bool success);
   void AllTranscodingJobsComplete();
   void LogLine(const QString& message);
@@ -83,17 +89,18 @@ class Ripper : public QObject {
   struct TrackInformation {
     TrackInformation(int track_number, const QString& title,
                      const QString& transcoded_filename,
-                     const TranscoderPreset& preset)
+                     const TranscoderPreset& preset, bool overwrite_existing)
         : track_number(track_number),
           title(title),
           transcoded_filename(transcoded_filename),
-          preset(preset) {}
+          preset(preset),
+          overwrite_existing(overwrite_existing) {}
 
     int track_number;
     QString title;
     QString transcoded_filename;
     TranscoderPreset preset;
-    QString temporary_filename;
+    bool overwrite_existing;
   };
 
   struct AlbumInformation {
@@ -107,16 +114,13 @@ class Ripper : public QObject {
     Song::FileType type;
   };
 
-  void WriteWAVHeader(QFile* stream, int32_t i_bytecount);
   void Rip();
   void SetupProgressInterval();
   void UpdateProgress();
-  void RemoveTemporaryDirectory();
   void TagFiles();
 
-  CdIo_t* cdio_;
+  int track_count_;
   Transcoder* transcoder_;
-  QString temporary_directory_;
   bool cancel_requested_;
   QMutex mutex_;
   int finished_success_;

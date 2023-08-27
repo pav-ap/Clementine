@@ -30,6 +30,7 @@
 
 #include "config.h"
 #include "core/logging.h"
+#include "core/organiseformat.h"
 #include "core/tagreaderclient.h"
 #include "devices/cddadevice.h"
 #include "devices/cddasongloader.h"
@@ -49,10 +50,12 @@ const int kCheckboxColumn = 0;
 const int kTrackNumberColumn = 1;
 const int kTrackTitleColumn = 2;
 const int kTrackDurationColumn = 3;
+const int kTrackFilenamePreviewColumn = 4;
 }  // namespace
 
 const char* RipCDDialog::kSettingsGroup = "Transcoder";
 const int RipCDDialog::kMaxDestinationItems = 10;
+const int RipCDDialog::kTranscodingProgressIntervalMs = 500;
 
 RipCDDialog::RipCDDialog(DeviceManager* device_manager, QWidget* parent)
     : QDialog(parent),
@@ -62,7 +65,7 @@ RipCDDialog::RipCDDialog(DeviceManager* device_manager, QWidget* parent)
           device_manager->FindDevicesByUrlSchemes(CddaDevice::url_schemes())),
       working_(false),
       cdda_device_(),
-      loader_(nullptr) {
+      transcoding_progress_timer_(this) {
   Q_ASSERT(device_manager);
   // Init
   ui_->setupUi(this);
@@ -73,7 +76,11 @@ RipCDDialog::RipCDDialog(DeviceManager* device_manager, QWidget* parent)
   ui_->tableWidget->horizontalHeader()->setSectionResizeMode(
       kTrackNumberColumn, QHeaderView::ResizeToContents);
   ui_->tableWidget->horizontalHeader()->setSectionResizeMode(
-      kTrackTitleColumn, QHeaderView::Stretch);
+      kTrackDurationColumn, QHeaderView::ResizeToContents);
+  ui_->tableWidget->horizontalHeader()->setSectionResizeMode(
+      kTrackTitleColumn, QHeaderView::ResizeToContents);
+  ui_->tableWidget->horizontalHeader()->setSectionResizeMode(
+      kTrackFilenamePreviewColumn, QHeaderView::Stretch);
 
   // Add a rip button
   rip_button_ = ui_->button_box->addButton(tr("Start ripping"),
@@ -85,10 +92,9 @@ RipCDDialog::RipCDDialog(DeviceManager* device_manager, QWidget* parent)
   cancel_button_->hide();
   ui_->progress_group->hide();
 
-  rip_button_->setEnabled(false);  // will be enabled by DeviceSelected if a
-                                   // valid device is selected
-
-  InitializeDevices();
+  rip_button_->setEnabled(
+      false);  // will be enabled by signal handlers if a valid device is
+               // selected by user and a list of tracks is loaded
 
   connect(ui_->select_all_button, SIGNAL(clicked()), SLOT(SelectAll()));
   connect(ui_->select_none_button, SIGNAL(clicked()), SLOT(SelectNone()));
@@ -99,6 +105,11 @@ RipCDDialog::RipCDDialog(DeviceManager* device_manager, QWidget* parent)
 
   connect(ui_->options, SIGNAL(clicked()), SLOT(Options()));
   connect(ui_->select, SIGNAL(clicked()), SLOT(AddDestination()));
+
+  connect(ui_->naming_group, SIGNAL(FormatStringChanged()),
+          SLOT(FormatStringUpdated()));
+  connect(ui_->naming_group, SIGNAL(OptionChanged()),
+          SLOT(FormatStringUpdated()));
 
   setWindowTitle(tr("Rip CD"));
   AddDestinationDirectory(QDir::homePath());
@@ -117,14 +128,32 @@ RipCDDialog::RipCDDialog(DeviceManager* device_manager, QWidget* parent)
   s.beginGroup(kSettingsGroup);
   last_add_dir_ = s.value("last_add_dir", QDir::homePath()).toString();
 
-  QString last_output_format = s.value("last_output_format", "ogg").toString();
+  QString last_output_format =
+      s.value("last_output_format", "audio/x-vorbis").toString();
+  qLog(Debug) << "last_output_format loaded: " << last_output_format;
   for (int i = 0; i < ui_->format->count(); ++i) {
     if (last_output_format ==
-        ui_->format->itemData(i).value<TranscoderPreset>().extension_) {
+        ui_->format->itemData(i).value<TranscoderPreset>().codec_mimetype_) {
       ui_->format->setCurrentIndex(i);
       break;
     }
   }
+
+  connect(ui_->format, SIGNAL(currentIndexChanged(int)),
+          SLOT(UpdateFileNamePreviews()));
+
+  connect(ui_->artistLineEdit, SIGNAL(textEdited(const QString&)),
+          SLOT(UpdateMetadataFromGUI()));
+  connect(ui_->albumLineEdit, SIGNAL(textEdited(const QString&)),
+          SLOT(UpdateMetadataFromGUI()));
+  connect(ui_->genreLineEdit, SIGNAL(textEdited(const QString&)),
+          SLOT(UpdateMetadataFromGUI()));
+  connect(ui_->yearLineEdit, SIGNAL(textEdited(const QString&)),
+          SLOT(YearEditChanged(const QString&)));
+  connect(ui_->discLineEdit, SIGNAL(textEdited(const QString&)),
+          SLOT(DiscEditChanged(const QString&)));
+
+  InitializeDevices();
 }
 
 RipCDDialog::~RipCDDialog() {}
@@ -176,17 +205,28 @@ void RipCDDialog::InitializeDevices() {
 void RipCDDialog::ClickedRipButton() {
   Q_ASSERT(cdda_device_);
 
+  OrganiseFormat format = ui_->naming_group->format();
+  Q_ASSERT(format.IsValid());
+
+  QFileInfo path(
+      ui_->destination->itemData(ui_->destination->currentIndex()).toString());
+
   // create and connect Ripper instance for this task
-  Ripper* ripper = new Ripper(cdda_device_->raw_cdio(), this);
+  Ripper* ripper = new Ripper(cdda_device_->song_count(), this);
+
   connect(cancel_button_, SIGNAL(clicked()), ripper, SLOT(Cancel()));
 
-  connect(ripper, &Ripper::Finished, this,
-          [this, ripper]() { this->Finished(ripper); });
-  connect(ripper, &Ripper::Cancelled, this,
-          [this, ripper]() { this->Cancelled(ripper); });
-  connect(ripper, SIGNAL(ProgressInterval(int, int)),
-          SLOT(SetupProgressBarLimits(int, int)));
-  connect(ripper, SIGNAL(Progress(int)), SLOT(UpdateProgressBar(int)));
+  connect(ripper, &Ripper::Finished, this, [this, ripper]() {
+    this->Finished(ripper, /*progress_to_display = */ 1.0f);
+  });
+  connect(ripper, &Ripper::Cancelled, this, [this, ripper]() {
+    this->Finished(ripper, /*progress_to_display = */ 0.0f);
+  });
+
+  ui_->progress_bar->setRange(0, 100);
+  transcoding_progress_timer_connection_ =
+      connect(&transcoding_progress_timer_, &QTimer::timeout, this,
+              [this, ripper]() { this->TranscodingProgressTimeout(ripper); });
 
   // Add tracks and album information to the ripper.
   ripper->ClearTracks();
@@ -196,11 +236,13 @@ void RipCDDialog::ClickedRipButton() {
     if (!checkboxes_.value(i - 1)->isChecked()) {
       continue;
     }
-    QString transcoded_filename = GetOutputFileName(
-        ParseFileFormatString(ui_->format_filename->text(), i));
-    QString title = track_names_.value(i - 1)->text();
-    ripper->AddTrack(i, title, transcoded_filename, preset);
+    Song& song = songs_[i - 1];
+    QString transcoded_filename = format.GetFilenameForSong(
+        song, preset, /*prefix_path=*/path.filePath());
+    ripper->AddTrack(i, song.title(), transcoded_filename, preset,
+                     ui_->naming_group->overwrite_existing());
   }
+
   ripper->SetAlbumInformation(
       ui_->albumLineEdit->text(), ui_->artistLineEdit->text(),
       ui_->genreLineEdit->text(), ui_->yearLineEdit->text().toInt(),
@@ -208,6 +250,15 @@ void RipCDDialog::ClickedRipButton() {
 
   SetWorking(true);
   ripper->Start();
+  transcoding_progress_timer_.start(kTranscodingProgressIntervalMs);
+
+  // store settings
+  QSettings s;
+  s.beginGroup(kSettingsGroup);
+  s.setValue("last_output_format", preset.codec_mimetype_);
+  qLog(Debug) << "last_output_format stored: " << preset.codec_mimetype_;
+
+  ui_->naming_group->StoreSettings();
 }
 
 void RipCDDialog::Options() {
@@ -270,11 +321,11 @@ void RipCDDialog::InvertSelection() {
 }
 
 void RipCDDialog::DeviceSelected(int device_index) {
-  // disconnecting from previous loader and device, if any
-  if (loader_) disconnect(loader_, nullptr, this, nullptr);
+  // disconnecting from previous device, if any
   if (cdda_device_) disconnect(cdda_device_.get(), nullptr, this, nullptr);
 
   ResetDialog();
+  EnableIfPossible();
   if (device_index < 0)
     return;  // Invalid selection, probably no devices around
 
@@ -292,49 +343,43 @@ void RipCDDialog::DeviceSelected(int device_index) {
     return;
   }
 
+  SongList songs = cdda_device_->songs();
+  SongsLoaded(songs);
+
   connect(cdda_device_.get(), SIGNAL(DiscChanged()), SLOT(DiscChanged()));
-
-  // get SongLoader from device and connect signals
-  loader_ = cdda_device_->loader();
-  Q_ASSERT(loader_);
-
-  connect(loader_, SIGNAL(SongsDurationLoaded(SongList)),
-          SLOT(BuildTrackListTable(SongList)));
-  connect(loader_, SIGNAL(SongsMetadataLoaded(SongList)),
-          SLOT(UpdateTrackListTable(SongList)));
-  connect(loader_, SIGNAL(SongsMetadataLoaded(SongList)),
-          SLOT(AddAlbumMetadataFromMusicBrainz(SongList)));
-
-  // load songs from new SongLoader
-  loader_->LoadSongs();
-  rip_button_->setEnabled(true);
+  connect(cdda_device_.get(), SIGNAL(SongsDiscovered(SongList)),
+          SLOT(SongsLoaded(SongList)));
 }
 
-void RipCDDialog::Finished(Ripper* ripper) {
+void RipCDDialog::Finished(Ripper* ripper, float progress_to_display) {
   SetWorking(false);
   ripper->deleteLater();
-}
+  transcoding_progress_timer_.stop();
+  disconnect(transcoding_progress_timer_connection_);
 
-void RipCDDialog::Cancelled(Ripper* ripper) {
-  ui_->progress_bar->setValue(0);
-  Finished(ripper);
-}
-
-void RipCDDialog::SetupProgressBarLimits(int min, int max) {
-  ui_->progress_bar->setRange(min, max);
-}
-
-void RipCDDialog::UpdateProgressBar(int progress) {
+  int progress = qBound(0, static_cast<int>(progress_to_display * 100.0f), 100);
   ui_->progress_bar->setValue(progress);
 }
 
-void RipCDDialog::BuildTrackListTable(const SongList& songs) {
-  checkboxes_.clear();
-  track_names_.clear();
+void RipCDDialog::SongsLoaded(const SongList& songs) {
+  if (songs_.isEmpty() || songs_.length() == songs.length()) {
+    songs_ = songs;
+    UpdateTrackListTable();
+    UpdateMetadataEdits();
+  } else {
+    qLog(Error) << "Number of tracks in metadata does not match number of "
+                   "songs on disc!";
+  }
+  EnableIfPossible();
+}
 
-  ui_->tableWidget->setRowCount(songs.length());
+void RipCDDialog::UpdateTrackListTable() {
+  checkboxes_.clear();
+
+  ui_->tableWidget->clear();
+  ui_->tableWidget->setRowCount(songs_.length());
   int current_row = 0;
-  for (const Song& song : songs) {
+  for (const Song& song : songs_) {
     QCheckBox* checkbox = new QCheckBox(ui_->tableWidget);
     checkbox->setCheckState(Qt::Checked);
     checkboxes_.append(checkbox);
@@ -343,31 +388,49 @@ void RipCDDialog::BuildTrackListTable(const SongList& songs) {
                                     new QLabel(QString::number(song.track())));
     QLineEdit* line_edit_track_title =
         new QLineEdit(song.title(), ui_->tableWidget);
-    track_names_.append(line_edit_track_title);
+    connect(line_edit_track_title, &QLineEdit::textChanged,
+            [this, current_row](const QString& text) {
+              songs_[current_row].set_title(text);
+              UpdateFileNamePreviews();
+            });
     ui_->tableWidget->setCellWidget(current_row, kTrackTitleColumn,
                                     line_edit_track_title);
     ui_->tableWidget->setCellWidget(current_row, kTrackDurationColumn,
                                     new QLabel(song.PrettyLength()));
     current_row++;
   }
+  UpdateFileNamePreviews();
 }
 
-void RipCDDialog::UpdateTrackListTable(const SongList& songs) {
-  if (track_names_.length() == songs.length()) {
-    BuildTrackListTable(songs);
-  } else {
-    qLog(Error) << "Number of tracks in metadata does not match number of "
-                   "songs on disc!";
+void RipCDDialog::UpdateFileNamePreviews() {
+  OrganiseFormat format = ui_->naming_group->format();
+  TranscoderPreset preset = ui_->format->itemData(ui_->format->currentIndex())
+                                .value<TranscoderPreset>();
+
+  int current_row = 0;
+  for (const Song& song : songs_) {
+    if (format.IsValid())
+      ui_->tableWidget->setCellWidget(
+          current_row, kTrackFilenamePreviewColumn,
+          new QLabel(format.GetFilenameForSong(song, preset)));
+    else
+      ui_->tableWidget->setCellWidget(current_row, kTrackFilenamePreviewColumn,
+                                      new QLabel(tr("Invalid format")));
+    current_row++;
   }
 }
 
-void RipCDDialog::AddAlbumMetadataFromMusicBrainz(const SongList& songs) {
-  Q_ASSERT(songs.length() > 0);
+void RipCDDialog::UpdateMetadataEdits() {
+  if (songs_.length() <= 0) return;
 
-  const Song& song = songs.first();
+  const Song& song = songs_.first();
   ui_->albumLineEdit->setText(song.album());
-  ui_->artistLineEdit->setText(song.artist());
-  ui_->yearLineEdit->setText(QString::number(song.year()));
+  if (!song.artist().isEmpty())
+    ui_->artistLineEdit->setText(song.artist());
+  else
+    ui_->artistLineEdit->setText(song.albumartist());
+  ui_->yearLineEdit->setText(song.PrettyYear());
+  ui_->genreLineEdit->setText(song.genre());
 }
 
 void RipCDDialog::DiscChanged() { ResetDialog(); }
@@ -382,35 +445,96 @@ void RipCDDialog::SetWorking(bool working) {
   ui_->progress_group->setVisible(true);
 }
 
-QString RipCDDialog::GetOutputFileName(const QString& basename) const {
-  QFileInfo path(
-      ui_->destination->itemData(ui_->destination->currentIndex()).toString());
-  QString extension = ui_->format->itemData(ui_->format->currentIndex())
-                          .value<TranscoderPreset>()
-                          .extension_;
-  return path.filePath() + '/' + basename + '.' + extension;
-}
-
-QString RipCDDialog::ParseFileFormatString(const QString& file_format,
-                                           int track_no) const {
-  QString to_return = file_format;
-  to_return.replace(QString("%artist"), ui_->artistLineEdit->text());
-  to_return.replace(QString("%album"), ui_->albumLineEdit->text());
-  to_return.replace(QString("%disc"), ui_->discLineEdit->text());
-  to_return.replace(QString("%genre"), ui_->genreLineEdit->text());
-  to_return.replace(QString("%year"), ui_->yearLineEdit->text());
-  to_return.replace(QString("%title"),
-                    track_names_.value(track_no - 1)->text());
-  to_return.replace(QString("%track"), QString::number(track_no));
-
-  return to_return;
-}
-
 void RipCDDialog::ResetDialog() {
+  songs_.clear();
   ui_->tableWidget->setRowCount(0);
   ui_->albumLineEdit->clear();
   ui_->artistLineEdit->clear();
   ui_->genreLineEdit->clear();
   ui_->yearLineEdit->clear();
   ui_->discLineEdit->clear();
+}
+
+void RipCDDialog::FormatStringUpdated() {
+  UpdateFileNamePreviews();
+  EnableIfPossible();
+}
+
+void RipCDDialog::EnableIfPossible() {
+  bool disc_ok;
+  ui_->discLineEdit->text().toInt(&disc_ok);
+  disc_ok |= ui_->discLineEdit->text().isEmpty();
+
+  bool year_ok;
+  ui_->yearLineEdit->text().toInt(&year_ok);
+  year_ok |= ui_->yearLineEdit->text().isEmpty();
+
+  rip_button_->setEnabled(!songs_.isEmpty() &&
+                          ui_->naming_group->format().IsValid() && disc_ok &&
+                          year_ok);
+}
+
+void RipCDDialog::DiscEditChanged(const QString& disc_string) {
+  bool disc_ok = false;
+  disc_string.toInt(&disc_ok);
+
+  bool is_valid = disc_string.isEmpty() || disc_ok;
+
+  QString style;
+  if (!is_valid) {
+    style = "color: red;";
+  } else {
+    UpdateMetadataFromGUI();
+  }
+  ui_->discLineEdit->setStyleSheet(style);
+  EnableIfPossible();
+}
+
+void RipCDDialog::YearEditChanged(const QString& year_string) {
+  bool year_ok = false;
+  year_string.toInt(&year_ok);
+
+  bool is_valid = year_string.isEmpty() || year_ok;
+
+  QString style;
+  if (!is_valid) {
+    style = "color: red;";
+  } else {
+    UpdateMetadataFromGUI();
+  }
+  ui_->yearLineEdit->setStyleSheet(style);
+  EnableIfPossible();
+}
+
+void RipCDDialog::UpdateMetadataFromGUI() {
+  QString artist = ui_->artistLineEdit->text();
+  QString album = ui_->albumLineEdit->text();
+  QString genre = ui_->genreLineEdit->text();
+  bool disc_ok = false;
+  int disc = ui_->discLineEdit->text().toInt(&disc_ok);
+  bool year_ok = false;
+  int year = ui_->yearLineEdit->text().toInt(&year_ok);
+
+  for (Song& song : songs_) {
+    song.set_artist(artist);
+    song.set_album(album);
+    song.set_genre(genre);
+    if (disc_ok)
+      song.set_disc(disc);
+    else
+      song.set_disc(-1);
+    if (year_ok)
+      song.set_year(year);
+    else
+      song.set_year(-1);
+  }
+  UpdateFileNamePreviews();
+}
+
+void RipCDDialog::TranscodingProgressTimeout(Ripper* ripper) {
+  if (working_) {
+    int progress =
+        qBound(0, static_cast<int>(ripper->GetProgress() * 100.0f), 100);
+    ui_->progress_bar->setValue(progress);
+  }
 }

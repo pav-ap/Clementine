@@ -49,11 +49,10 @@ class CddaDevice : public ConnectedDevice {
     return false;
   }
   CddaSongLoader* loader();
-  // Access to the raw cdio device handle.
-  CdIo_t* raw_cdio();  // TODO: not ideal, but Ripper needs this currently
   // Check whether a valid device handle was opened.
   bool IsValid() const;
   void WatchForDiscChanges(bool watch);
+  SongList songs() const;
 
   static QStringList url_schemes() { return QStringList() << "cdda"; }
 
@@ -74,6 +73,7 @@ class CddaDevice : public ConnectedDevice {
 
  private slots:
   void SongsLoaded(const SongList& songs);
+  void SongsLoadingFinished();
   void CheckDiscChanged();
 
  private:

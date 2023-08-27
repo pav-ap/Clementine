@@ -32,12 +32,10 @@ CddaDevice::CddaDevice(const QUrl& url, DeviceLister* lister,
       cdio_(nullptr),
       disc_changed_timer_(),
       cdda_song_loader_(url) {
-  connect(&cdda_song_loader_, SIGNAL(SongsLoaded(SongList)), this,
+  connect(&cdda_song_loader_, SIGNAL(SongsUpdated(SongList)), this,
           SLOT(SongsLoaded(SongList)));
-  connect(&cdda_song_loader_, SIGNAL(SongsDurationLoaded(SongList)), this,
-          SLOT(SongsLoaded(SongList)));
-  connect(&cdda_song_loader_, SIGNAL(SongsMetadataLoaded(SongList)), this,
-          SLOT(SongsLoaded(SongList)));
+  connect(&cdda_song_loader_, SIGNAL(Finished()), this,
+          SLOT(SongsLoadingFinished()));
   connect(this, SIGNAL(SongsDiscovered(SongList)), model_,
           SLOT(SongsDiscovered(SongList)));
   connect(&disc_changed_timer_, SIGNAL(timeout()), SLOT(CheckDiscChanged()));
@@ -62,8 +60,6 @@ bool CddaDevice::Init() {
 
 CddaSongLoader* CddaDevice::loader() { return &cdda_song_loader_; }
 
-CdIo_t* CddaDevice::raw_cdio() { return cdio_; }
-
 bool CddaDevice::IsValid() const { return (cdio_ != nullptr); }
 
 void CddaDevice::WatchForDiscChanges(bool watch) {
@@ -73,13 +69,28 @@ void CddaDevice::WatchForDiscChanges(bool watch) {
     disc_changed_timer_.stop();
 }
 
-void CddaDevice::LoadSongs() { cdda_song_loader_.LoadSongs(); }
+void CddaDevice::LoadSongs() {
+  cdda_song_loader_.LoadSongs();
+  disc_changed_timer_.stop();
+}
 
 void CddaDevice::SongsLoaded(const SongList& songs) {
   model_->Reset();
-  emit SongsDiscovered(songs);
   song_count_ = songs.size();
+  emit SongsDiscovered(songs);
+  // When a disc is inserted, cdio_get_media_changed will
+  // return true for two times with a bit of delay in between
+  // (at least on linux).
+  // We clear cdio_get_media_changed after songs are
+  // loaded, so we don't potentially re-read the same disc.terminal
+  // There's a slight chance that this hides an actual
+  // media change, but this should be rare enough to not
+  // be a problem in practice and is easily rectified
+  // by user cycling the disc once more.
+  cdio_get_media_changed(cdio_);
 }
+
+void CddaDevice::SongsLoadingFinished() { disc_changed_timer_.start(); }
 
 void CddaDevice::CheckDiscChanged() {
   if (!cdio_) return;  // do nothing if not initialized
@@ -96,3 +107,5 @@ void CddaDevice::CheckDiscChanged() {
     LoadSongs();
   }
 }
+
+SongList CddaDevice::songs() const { return cdda_song_loader_.cached_tracks(); }

@@ -98,6 +98,9 @@ TranscodeDialog::TranscodeDialog(QWidget* parent)
     }
   }
 
+  ui_->remove_original->setChecked(
+      s.value("overwrite_existing", false).toBool());
+
   // Add a start button
   start_button_ = ui_->button_box->addButton(tr("Start transcoding"),
                                              QDialogButtonBox::ActionRole);
@@ -121,8 +124,8 @@ TranscodeDialog::TranscodeDialog(QWidget* parent)
   connect(ui_->options, SIGNAL(clicked()), SLOT(Options()));
   connect(ui_->select, SIGNAL(clicked()), SLOT(AddDestination()));
 
-  connect(transcoder_, SIGNAL(JobComplete(QString, QString, bool)),
-          SLOT(JobComplete(QString, QString, bool)));
+  connect(transcoder_, SIGNAL(JobComplete(QUrl, QString, bool)),
+          SLOT(JobComplete(QUrl, QString, bool)));
   connect(transcoder_, SIGNAL(LogLine(QString)), SLOT(LogLine(QString)));
   connect(transcoder_, SIGNAL(AllJobsComplete()), SLOT(AllJobsComplete()));
 }
@@ -162,7 +165,8 @@ void TranscodeDialog::Start() {
     QFileInfo input_fileinfo(
         file_model->index(i, 0).data(Qt::UserRole).toString());
     QString output_filename = GetOutputFileName(input_fileinfo, preset);
-    transcoder_->AddJob(input_fileinfo.filePath(), preset, output_filename);
+    transcoder_->AddJob(QUrl::fromLocalFile(input_fileinfo.filePath()), preset,
+                        output_filename);
   }
 
   // Set up the progressbar
@@ -182,6 +186,7 @@ void TranscodeDialog::Start() {
   QSettings s;
   s.beginGroup(kSettingsGroup);
   s.setValue("last_output_format", preset.codec_mimetype_);
+  s.setValue("overwrite_existing", ui_->remove_original->isChecked());
 }
 
 void TranscodeDialog::Cancel() {
@@ -195,7 +200,7 @@ void TranscodeDialog::PipelineDumpAction(bool checked) {
   }
 }
 
-void TranscodeDialog::JobComplete(const QString& input, const QString& output,
+void TranscodeDialog::JobComplete(const QUrl& input, const QString& output,
                                   bool success) {
   if (success)
     finished_success_++;
@@ -205,12 +210,29 @@ void TranscodeDialog::JobComplete(const QString& input, const QString& output,
 
   UpdateStatusText();
   UpdateProgress();
+
+  bool overwrite_existing = ui_->remove_original->isChecked();
+
+  if (success && overwrite_existing && input.isLocalFile()) {
+    QFileInfo input_fileinfo(input.toLocalFile());
+    QFileInfo output_fileinfo(output);
+
+    bool same_extension = input_fileinfo.suffix() == output_fileinfo.suffix();
+    bool same_path =
+        input_fileinfo.absolutePath() == output_fileinfo.absolutePath();
+
+    QFile(input_fileinfo.absoluteFilePath()).remove();
+    if (same_path && same_extension) {
+      QFile(output_fileinfo.absoluteFilePath())
+          .rename(input_fileinfo.fileName());
+    }
+  }
 }
 
 void TranscodeDialog::UpdateProgress() {
   int progress = (finished_success_ + finished_failed_) * 100;
 
-  QMap<QString, float> current_jobs = transcoder_->GetProgress();
+  QMap<QUrl, float> current_jobs = transcoder_->GetProgress();
   for (float value : current_jobs.values()) {
     progress += qBound(0, int(value * 100), 99);
   }

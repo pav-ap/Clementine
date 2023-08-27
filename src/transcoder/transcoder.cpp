@@ -32,6 +32,11 @@
 
 using std::shared_ptr;
 
+static QString UrlToLocalFileIfPossible(QUrl url) {
+  if (url.isLocalFile()) return url.toLocalFile();
+  return url.toString();
+}
+
 int Transcoder::JobFinishedEvent::sEventType = -1;
 
 TranscoderPreset::TranscoderPreset(Song::FileType type, const QString& name,
@@ -210,8 +215,7 @@ void Transcoder::JobState::PostFinished(bool success) {
 }
 
 QString Transcoder::JobState::GetDisplayName() {
-  return QFileInfo(job_.input).fileName() + " => " +
-         QFileInfo(job_.output).fileName();
+  return job_.input.fileName() + " => " + QFileInfo(job_.output).fileName();
 }
 
 Transcoder::Transcoder(QObject* parent, const QString& settings_postfix)
@@ -318,8 +322,8 @@ Song::FileType Transcoder::PickBestFormat(QList<Song::FileType> supported) {
   return supported[0];
 }
 
-void Transcoder::AddJob(const QString& input, const TranscoderPreset& preset,
-                        const QString& output) {
+void Transcoder::AddJob(const QUrl& input, const TranscoderPreset& preset,
+                        const QString& output, bool overwrite_existing) {
   Job job;
   job.input = input;
   job.preset = preset;
@@ -329,10 +333,11 @@ void Transcoder::AddJob(const QString& input, const TranscoderPreset& preset,
   if (!output.isEmpty())
     job.output = output;
   else
-    job.output = input.section('.', 0, -2) + '.' + preset.extension_;
+    job.output = UrlToLocalFileIfPossible(input).section('.', 0, -2) + '.' +
+                 preset.extension_;
 
-  // Never overwrite existing files
-  if (QFile::exists(job.output)) {
+  // Don't overwrite existing files if overwrite_existing is not set
+  if (!overwrite_existing && QFile::exists(job.output)) {
     for (int i = 0;; ++i) {
       QString new_filename = QString("%1.%2.%3")
                                  .arg(job.output.section('.', 0, -2))
@@ -348,14 +353,9 @@ void Transcoder::AddJob(const QString& input, const TranscoderPreset& preset,
   queued_jobs_ << job;
 }
 
-void Transcoder::AddTemporaryJob(const QString& input,
+void Transcoder::AddTemporaryJob(const QUrl& input,
                                  const TranscoderPreset& preset) {
-  Job job;
-  job.input = input;
-  job.output = Utilities::GetTemporaryFileName();
-  job.preset = preset;
-
-  queued_jobs_ << job;
+  AddJob(input, preset, Utilities::GetTemporaryFileName());
 }
 
 void Transcoder::Start() {
@@ -432,15 +432,20 @@ void Transcoder::JobState::ReportError(GstMessage* msg) {
   g_error_free(error);
   free(debugs);
 
+  // clean up output file if it was already created
+  if (QFile::exists(job_.output)) {
+    QFile::remove(job_.output);
+  }
+
   emit parent_->LogLine(
       tr("Error processing %1: %2")
-          .arg(QDir::toNativeSeparators(job_.input), message));
+          .arg(UrlToLocalFileIfPossible(job_.input), message));
 }
 
 bool Transcoder::StartJob(const Job& job) {
   shared_ptr<JobState> state(new JobState(job, this));
 
-  emit LogLine(tr("Starting %1").arg(QDir::toNativeSeparators(job.input)));
+  emit LogLine(tr("Starting %1").arg(UrlToLocalFileIfPossible(job.input)));
 
   // Create the pipeline.
   // This should be a scoped_ptr, but scoped_ptr doesn't support custom
@@ -448,8 +453,7 @@ bool Transcoder::StartJob(const Job& job) {
   if (!state->Init()) return false;
 
   // Create all the elements
-  GstElement* src = CreateElement("filesrc", state->Pipeline());
-  GstElement* decode = CreateElement("decodebin", state->Pipeline());
+  GstElement* decode = CreateElement("uridecodebin", state->Pipeline());
   GstElement* convert = CreateElement("audioconvert", state->Pipeline());
   GstElement* resample = CreateElement("audioresample", state->Pipeline());
   GstElement* codec = CreateElementForMimeType(
@@ -458,7 +462,7 @@ bool Transcoder::StartJob(const Job& job) {
       "Codec/Muxer", job.preset.muxer_mimetype_, state->Pipeline());
   GstElement* sink = CreateElement("filesink", state->Pipeline());
 
-  if (!src || !decode || !convert || !sink) return false;
+  if (!decode || !convert || !sink) return false;
 
   if (!codec && !job.preset.codec_mimetype_.isEmpty()) {
     emit LogLine(
@@ -476,7 +480,6 @@ bool Transcoder::StartJob(const Job& job) {
   }
 
   // Join them together
-  gst_element_link(src, decode);
   if (codec && muxer)
     gst_element_link_many(convert, resample, codec, muxer, sink, nullptr);
   else if (codec)
@@ -485,8 +488,13 @@ bool Transcoder::StartJob(const Job& job) {
     gst_element_link_many(convert, resample, muxer, sink, nullptr);
 
   // Set properties
-  g_object_set(src, "location", job.input.toUtf8().constData(), nullptr);
+  g_object_set(decode, "uri", job.input.toString().toUtf8().constData(),
+               nullptr);
   g_object_set(sink, "location", job.output.toUtf8().constData(), nullptr);
+
+  // Create target directory, if it does not exist
+  QFileInfo output_file_path(job.output);
+  output_file_path.dir().mkpath(".");
 
   // Set callbacks
   state->convert_element_ = convert;
@@ -524,7 +532,7 @@ bool Transcoder::event(QEvent* e) {
       return true;
     }
 
-    QString input = (*it)->job_.input;
+    QUrl input = (*it)->job_.input;
     QString output = (*it)->job_.output;
 
     // Remove event handlers from the gstreamer pipeline so they don't get
@@ -587,8 +595,8 @@ void Transcoder::DumpGraph(int id) {
   }
 }
 
-QMap<QString, float> Transcoder::GetProgress() const {
-  QMap<QString, float> ret;
+QMap<QUrl, float> Transcoder::GetProgress() const {
+  QMap<QUrl, float> ret;
 
   for (const auto& state : current_jobs_) {
     if (!state->Pipeline()) continue;
