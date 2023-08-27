@@ -590,6 +590,7 @@ void Song::ToProtobuf(cpb::tagreader::SongMetadata* pb) const {
   pb->set_track(d->track_);
   pb->set_disc(d->disc_);
   pb->set_bpm(d->bpm_);
+  printf("Setting protobuf bpm: %f\n", d->bpm_); //MEHT
   pb->set_year(d->year_);
   pb->set_originalyear(d->originalyear_);
   pb->set_genre(DataCommaSizeFromQString(d->genre_));

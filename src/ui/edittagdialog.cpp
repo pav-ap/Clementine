@@ -313,11 +313,13 @@ QVariant EditTagDialog::Data::value(const Song& song, const QString& id) {
   if (id == "track") return song.track();
   if (id == "disc") return song.disc();
   if (id == "year") return song.year();
+  if (id == "bpm2") return song.bpm();
   qLog(Warning) << "Unknown ID" << id;
   return QVariant();
 }
 
 void EditTagDialog::Data::set_value(const QString& id, const QVariant& value) {
+    printf("Setting value: %s, %f\n", id.toUtf8().data(), value.toFloat()); //MEHT
   if (id == "title")
     current_.set_title(value.toString());
   else if (id == "artist")
@@ -344,6 +346,8 @@ void EditTagDialog::Data::set_value(const QString& id, const QVariant& value) {
     current_.set_disc(value.toInt());
   else if (id == "year")
     current_.set_year(value.toInt());
+  else if (id == "bpm2")
+    current_.set_bpm(value.toFloat());
   else
     qLog(Warning) << "Unknown ID" << id;
 }
@@ -385,6 +389,7 @@ void EditTagDialog::InitFieldValue(const FieldData& field,
 
 void EditTagDialog::UpdateFieldValue(const FieldData& field,
                                      const QModelIndexList& sel) {
+    printf("UpdateFieldValue\n"); //MEHT
   // Get the value from the field
   QVariant value;
   if (ExtendedEditor* editor = dynamic_cast<ExtendedEditor*>(field.editor_)) {
@@ -546,6 +551,7 @@ void EditTagDialog::ArtLoaded(quint64 id, const QImage& scaled,
 }
 
 void EditTagDialog::FieldValueEdited() {
+    printf("FieldValueEdited\n"); //MEHT
   if (ignore_edits_) return;
 
   const QModelIndexList sel =
@@ -698,8 +704,10 @@ void EditTagDialog::ButtonClicked(QAbstractButton* button) {
 }
 
 void EditTagDialog::SaveData(const QList<Data>& data) {
+    printf("Saving %i\n", data.count()); //MEHT
   for (int i = 0; i < data.count(); ++i) {
     const Data& ref = data[i];
+    printf("Saving number %i: '%s', bpm: %f\n", i, ref.current_.title().toUtf8().data(), ref.current_.bpm()); //MEHT
     if (ref.current_.IsMetadataEqual(ref.original_)) continue;
 
     if (!TagReaderClient::Instance()->SaveFileBlocking(
@@ -765,7 +773,8 @@ bool EditTagDialog::eventFilter(QObject* o, QEvent* e) {
 
 void EditTagDialog::showEvent(QShowEvent* e) {
   // Set the dialog's height to the smallest possible
-  resize(width(), sizeHint().height());
+  // screw that, make it fit on a 1366x768
+  resize(width(), 600); //sizeHint().height());
 
   // Restore the tab that was current last time.
   QSettings s;
@@ -860,6 +869,7 @@ void EditTagDialog::FetchTagSongChosen(const Song& original_song,
   data_it->current_.set_album(new_metadata.album());
   data_it->current_.set_track(new_metadata.track());
   data_it->current_.set_year(new_metadata.year());
+  data_it->current_.set_bpm(new_metadata.bpm());
 
   // Is it currently being displayed in the UI?
   if (ui_->song_list->currentRow() == std::distance(data_.begin(), data_it)) {
