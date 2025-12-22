@@ -35,6 +35,19 @@ class CloudStream : public QObject, public TagLib::IOStream {
 
   // Taglib::IOStream
   virtual TagLib::FileName name() const;
+#if (TAGLIB_MAJOR_VERSION == 2)
+  virtual TagLib::ByteVector readBlock(size_t length);
+  virtual void writeBlock(const TagLib::ByteVector&);
+  virtual void insert(const TagLib::ByteVector&, TagLib::offset_t, size_t);
+  virtual void removeBlock(TagLib::offset_t, size_t);
+  virtual bool readOnly() const;
+  virtual bool isOpen() const;
+  virtual void seek(TagLib::offset_t offset, TagLib::IOStream::Position p);
+  virtual void clear();
+  virtual TagLib::offset_t tell() const;
+  virtual TagLib::offset_t length();
+  virtual void truncate(TagLib::offset_t);
+#else
   virtual TagLib::ByteVector readBlock(ulong length);
   virtual void writeBlock(const TagLib::ByteVector&);
   virtual void insert(const TagLib::ByteVector&, ulong, ulong);
@@ -46,6 +59,7 @@ class CloudStream : public QObject, public TagLib::IOStream {
   virtual long tell() const;
   virtual long length();
   virtual void truncate(long);
+#endif
 
   google::sparsetable<char>::size_type cached_bytes() const {
     return cache_.num_nonempty();
