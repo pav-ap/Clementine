@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.0.0)
+cmake_minimum_required(VERSION 3.16.0)
 
 set (XGETTEXT_OPTIONS --qt --keyword=tr:1,2c --keyword=tr --flag=tr:1:pass-c-format --flag=tr:1:pass-qt-format
     --keyword=trUtf8 --flag=tr:1:pass-c-format --flag=tr:1:pass-qt-format
@@ -68,5 +68,5 @@ macro(add_po outfiles po_prefix)
     file(APPEND ${_qrc} "<file>${po_prefix}${_lang}.qm</file>")
   endforeach(_lang)
   file(APPEND ${_qrc} "</qresource></RCC>")
-  qt5_add_resources(${outfiles} ${_qrc})
+  qt6_add_resources(${outfiles} ${_qrc})
 endmacro(add_po)

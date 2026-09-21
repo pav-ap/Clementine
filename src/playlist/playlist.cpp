@@ -1092,7 +1092,7 @@ void Playlist::InsertItemsWithoutUndo(const PlaylistItemList& items, int pos,
     if (item->IsLocalLibraryItem()) {
       int id = item->Metadata().id();
       if (id != -1) {
-        library_items_by_id_.insertMulti(id, item);
+        library_items_by_id_.insert(id, item);
       }
     }
 
@@ -1219,7 +1219,7 @@ void Playlist::UpdateItems(const SongList& songs) {
         PlaylistItemPtr new_item;
         if (song.is_library_song()) {
           new_item = PlaylistItemPtr(new LibraryPlaylistItem(song));
-          library_items_by_id_.insertMulti(song.id(), new_item);
+          library_items_by_id_.insert(song.id(), new_item);
         } else {
           new_item = PlaylistItemPtr(new SongPlaylistItem(song));
         }
@@ -1571,12 +1571,14 @@ void Playlist::Restore() {
 
   cancel_restore_ = false;
   QFuture<QList<PlaylistItemPtr>> future =
-      QtConcurrent::run(backend_, &PlaylistBackend::GetPlaylistItems, id_);
-  NewClosure(future, this, SLOT(ItemsLoaded(QFuture<PlaylistItemList>)),
+      QtConcurrent::run(&PlaylistBackend::GetPlaylistItems, backend_, id_);
+  NewClosure(future, this,
+             SLOT(ItemsLoaded(QFuture<QList<std::shared_ptr<PlaylistItem>>>)),
              future);
 }
 
-void Playlist::ItemsLoaded(QFuture<PlaylistItemList> future) {
+void Playlist::ItemsLoaded(
+    QFuture<QList<std::shared_ptr<PlaylistItem>>> future) {
   if (cancel_restore_) return;
 
   PlaylistItemList items = future.result();
@@ -1631,7 +1633,7 @@ void Playlist::ItemsLoaded(QFuture<PlaylistItemList> future) {
 
   // should we gray out deleted songs asynchronously on startup?
   if (s.value("greyoutdeleted", false).toBool()) {
-    QtConcurrent::run(this, &Playlist::InvalidateDeletedSongs);
+    (void)QtConcurrent::run(&Playlist::InvalidateDeletedSongs, this);
   }
 }
 
@@ -2083,9 +2085,12 @@ void Playlist::ReshuffleIndices() {
       break;
 
     case PlaylistSequence::Shuffle_All:
-    case PlaylistSequence::Shuffle_InsideAlbum:
-      std::random_shuffle(begin, end);
+    case PlaylistSequence::Shuffle_InsideAlbum: {
+      static std::random_device rd;
+      static std::mt19937 gen(rd());
+      std::shuffle(begin, end, gen);
       break;
+    }
 
     case PlaylistSequence::Shuffle_Albums: {
       QMap<int, QString> album_keys;  // real index -> key
@@ -2101,8 +2106,10 @@ void Playlist::ReshuffleIndices() {
 
       // Shuffle them
       QStringList shuffled_album_keys = album_key_set.values();
-      std::random_shuffle(shuffled_album_keys.begin(),
-                          shuffled_album_keys.end());
+
+      static std::random_device rd;
+      static std::mt19937 gen(rd());
+      std::shuffle(shuffled_album_keys.begin(), shuffled_album_keys.end(), gen);
 
       // If the user is currently playing a song, force its album to be first
       // Or if the song was not playing but it was selected, force its album

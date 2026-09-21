@@ -14,8 +14,8 @@ set(SOURCES
   tagreaderworker.cpp
 )
 
-qt5_wrap_cpp(MOC ${HEADERS})
-qt5_add_resources(QRC data/data.qrc)
+qt6_wrap_cpp(MOC ${HEADERS})
+qt6_add_resources(QRC data/data.qrc)
 
 add_executable(clementine-tagreader
   ${SOURCES}
@@ -27,8 +27,9 @@ target_link_libraries(clementine-tagreader
   ${TAGLIB_LIBRARIES}
   libclementine-common
   libclementine-tagreader
-  Qt5::Core
-  Qt5::Network
+  protobuf::libprotobuf
+  Qt6::Core
+  Qt6::Network
   z
 )
 

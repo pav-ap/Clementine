@@ -1,7 +1,5 @@
-cmake_minimum_required(VERSION 3.13.0)
+cmake_minimum_required(VERSION 3.16.0)
 project(clementine)
-
-cmake_policy(SET CMP0053 OLD)
 
 include(CheckCXXCompilerFlag)
 include(FindPkgConfig)
@@ -47,7 +45,8 @@ endif(OPENGL_FOUND)
 find_package(Boost REQUIRED)
 find_package(Gettext REQUIRED)
 find_package(PkgConfig REQUIRED)
-find_package(protobuf)
+list(APPEND CMAKE_PREFIX_PATH /opt/homebrew)
+find_package(protobuf CONFIG)
 if(NOT protobuf_FOUND)
   find_package(Protobuf REQUIRED)
 endif()
@@ -82,45 +81,25 @@ pkg_check_modules(TAGLIB taglib)
 
 find_package(ZLIB REQUIRED)
 
-find_library(LASTFM5_LIBRARIES lastfm5)
-find_path(LASTFM5_INCLUDE_DIRS lastfm5/ws.h)
-find_path(LASTFM51_INCLUDE_DIRS lastfm5/Track.h)
-
 find_path(SPARSEHASH_INCLUDE_DIRS google/sparsetable)
 
 # QT
-set(QT_MIN_VERSION 5.6.0)
-find_package(Qt5 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core Concurrent Widgets Network Sql Xml OpenGL Test)
+set(QT_MIN_VERSION 6.2.0)
+find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core Concurrent Widgets Network Sql Xml OpenGL OpenGLWidgets Test Core5Compat)
 if(HAVE_X11)
-  find_package(Qt5 ${QT_MIN_VERSION} REQUIRED COMPONENTS X11Extras)
-  find_package(Qt5DBus ${QT_MIN_VERSION})
-endif()
-if(APPLE)
-  find_package(Qt5 REQUIRED COMPONENTS MacExtras)
-endif()
-if(WIN32)
-  find_package(Qt5 REQUIRED COMPONENTS WinExtras)
+  find_package(Qt6DBus ${QT_MIN_VERSION})
 endif()
 
-set(QT_LIBRARIES Qt5::Core Qt5::Concurrent Qt5::Widgets Qt5::Network Qt5::Sql Qt5::Xml Qt5::OpenGL)
+set(QT_LIBRARIES Qt6::Core Qt6::Concurrent Qt6::Widgets Qt6::Network Qt6::Sql Qt6::Xml Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Core5Compat)
 
-if(Qt5DBus_FOUND)
-  set(QT_LIBRARIES ${QT_LIBRARIES} Qt5::DBus)
-  get_target_property(QT_DBUSXML2CPP_EXECUTABLE Qt5::qdbusxml2cpp LOCATION)
-endif()
-if(HAVE_X11)
-  set(QT_LIBRARIES ${QT_LIBRARIES} Qt5::X11Extras)
-endif()
-if(APPLE)
-  set(QT_LIBRARIES ${QT_LIBRARIES} Qt5::MacExtras)
-endif()
-if(WIN32)
-  set(QT_LIBRARIES ${QT_LIBRARIES} Qt5::WinExtras)
+if(Qt6DBus_FOUND)
+  set(QT_LIBRARIES ${QT_LIBRARIES} Qt6::DBus)
+  get_target_property(QT_DBUSXML2CPP_EXECUTABLE Qt6::qdbusxml2cpp LOCATION)
 endif()
 
-find_package(Qt5LinguistTools CONFIG)
-if (Qt5LinguistTools_FOUND)
-  set(QT_LCONVERT_EXECUTABLE Qt5::lconvert)
+find_package(Qt6LinguistTools CONFIG)
+if (Qt6LinguistTools_FOUND)
+  set(QT_LCONVERT_EXECUTABLE Qt6::lconvert)
 endif()
 
 
@@ -159,10 +138,6 @@ else()
   add_subdirectory(3rdparty/utf8-cpp)
   add_subdirectory(3rdparty/taglib)
   add_definitions(-DTAGLIB_STATIC)
-endif()
-
-if(LASTFM5_INCLUDE_DIRS AND LASTFM51_INCLUDE_DIRS)
-  set(HAVE_LIBLASTFM1 ON)
 endif()
 
 if (APPLE)
@@ -274,20 +249,16 @@ optional_component(LIBMTP ON "Devices: MTP support"
   DEPENDS "libmtp" LIBMTP_FOUND
 )
 
-optional_component(LIBLASTFM ON "Last.fm support"
-  DEPENDS "liblastfm" LASTFM5_LIBRARIES LASTFM5_INCLUDE_DIRS
-)
-
 optional_component(DBUS ON "D-Bus support"
-  DEPENDS "Qt5DBus" Qt5DBus_FOUND
+  DEPENDS "Qt6DBus" Qt6DBus_FOUND
 )
 
 optional_component(WIIMOTEDEV ON "Wiimote support"
-  DEPENDS "D-Bus support" Qt5DBus_FOUND
+  DEPENDS "D-Bus support" Qt6DBus_FOUND
 )
 
 optional_component(UDISKS2 ON "Devices: UDisks2 backend"
-  DEPENDS "D-Bus support" Qt5DBus_FOUND
+  DEPENDS "D-Bus support" Qt6DBus_FOUND
 )
 
 optional_component(MOODBAR ON "Moodbar support"
@@ -313,7 +284,7 @@ optional_component(VISUALISATIONS ON "Visualisations"
 
 optional_component(TRANSLATIONS ON "Translations"
   DEPENDS "gettext" GETTEXT_XGETTEXT_EXECUTABLE
-  DEPENDS "Qt5LinguistTools" Qt5LinguistTools_FOUND
+  DEPENDS "Qt6LinguistTools" Qt6LinguistTools_FOUND
 )
 
 option(USE_BUNDLE "Bundle macos/windows dependencies" ON)
@@ -325,19 +296,35 @@ endif()
 # and don't exist on my mingw toolchain
 list(REMOVE_ITEM QT_LIBRARIES "-lGLU -lGL")
 
-option(USE_SYSTEM_PROJECTM "Don't set this option unless your system projectM library has been compiled with the Clementine patches in 3rdparty" OFF)
-option(BUNDLE_PROJECTM_PRESETS "Install Clementine's own copies of libprojectm presets - disable this if you want to use a system package instead" ON)
+option(USE_SYSTEM_PROJECTM "Use system-installed projectM 4.x library instead of the bundled copy" ON)
 
 if(HAVE_VISUALISATIONS)
-  # When/if upstream accepts our patches then these options can be used to link
-  # to system installed projectM instead.
   if(USE_SYSTEM_PROJECTM)
-    pkg_check_modules(LIBPROJECTM libprojectM)
-  else(USE_SYSTEM_PROJECTM)
+    find_package(projectM4 QUIET)
+    find_package(projectM4Playlist QUIET)
+  endif()
+
+  if(projectM4_FOUND AND projectM4Playlist_FOUND)
+    message(STATUS "Using system projectM library")
+    set(LIBPROJECTM_LIBRARIES libprojectM::projectM libprojectM::playlist)
+  else()
+    if(USE_SYSTEM_PROJECTM)
+      message(STATUS "System projectM 4.x not found, falling back to bundled copy")
+    else()
+      message(STATUS "Using bundled projectM library")
+    endif()
+    # Build the bundled projectM 4.x as a static library
+    set(BUILD_SHARED_LIBS OFF)
+    set(ENABLE_PLAYLIST ON CACHE BOOL "" FORCE)
+    set(ENABLE_SDL_UI OFF CACHE BOOL "" FORCE)
+    set(ENABLE_SYSTEM_GLM OFF CACHE BOOL "" FORCE)
+    set(ENABLE_SYSTEM_PROJECTM_EVAL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(BUILD_DOCS OFF CACHE BOOL "" FORCE)
     add_subdirectory(3rdparty/libprojectm)
-    set(LIBPROJECTM_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libprojectm)
-    set(LIBPROJECTM_LIBRARIES projectM)
-  endif(USE_SYSTEM_PROJECTM)
+    set(LIBPROJECTM_LIBRARIES projectM projectM_playlist)
+  endif()
 endif(HAVE_VISUALISATIONS)
 
 
@@ -353,13 +340,17 @@ include_directories("3rdparty/qsqlite")
 # to system installed qtsingleapplication instead.
 option(USE_SYSTEM_QTSINGLEAPPLICATION "Use the system-provided QtSingleApplication library (needs to have clementine patches, but these seem to be in Qt5)" OFF)
 if(USE_SYSTEM_QTSINGLEAPPLICATION)
-  find_path(QTSINGLEAPPLICATION_INCLUDE_DIRS qtsingleapplication.h PATH_SUFFIXES qt5/QtSolutions REQUIRED)
-  find_library(QTSINGLEAPPLICATION_LIBRARIES Qt5Solutions_SingleApplication-2.6 REQUIRED)
+  # Untested under Qt6 - the qt-solutions project never officially adopted a
+  # "Qt6Solutions" naming scheme, so a system package matching this may not
+  # exist. Defaults to OFF; the vendored 3rdparty/qtsingleapplication below
+  # is what's actually used unless a caller opts into this explicitly.
+  find_path(QTSINGLEAPPLICATION_INCLUDE_DIRS qtsingleapplication.h PATH_SUFFIXES qt6/QtSolutions REQUIRED)
+  find_library(QTSINGLEAPPLICATION_LIBRARIES Qt6Solutions_SingleApplication-2.6 REQUIRED)
   add_library(qtsingleapplication INTERFACE)
   target_link_libraries(qtsingleapplication INTERFACE QTSINGLEAPPLICATION_LIBRARIES)
   target_include_directories(qtsingleapplication INTERFACE QTSINGLEAPPLICATION_INCLUDE_DIRS)
-  find_path(QTSINGLECOREAPPLICATION_INCLUDE_DIRS qtsinglecoreapplication.h PATH_SUFFIXES qt5/QtSolutions REQUIRED)
-  find_library(QTSINGLECOREAPPLICATION_LIBRARIES Qt5Solutions_SingleCoreApplication-2.6 REQUIRED)
+  find_path(QTSINGLECOREAPPLICATION_INCLUDE_DIRS qtsinglecoreapplication.h PATH_SUFFIXES qt6/QtSolutions REQUIRED)
+  find_library(QTSINGLECOREAPPLICATION_LIBRARIES Qt6Solutions_SingleCoreApplication-2.6 REQUIRED)
   add_library(qtsinglecoreapplication INTERFACE)
   target_link_libraries(qtsinglecoreapplication INTERFACE QTSINGLECOREAPPLICATION_LIBRARIES)
   target_include_directories(qtsinglecoreapplication INTERFACE QTSINGLECOREAPPLICATION_INCLUDE_DIRS)
@@ -383,11 +374,12 @@ endif(NOT QTIOCOMPRESSOR_INCLUDE_DIRS OR NOT QTIOCOMPRESSOR_LIBRARIES)
 # used to link to system installed qxt instead.
 option(USE_SYSTEM_QXT "Don't set this option unless your system Qxt library has been compiled with the Clementine patches in 3rdparty" OFF)
 if (USE_SYSTEM_QXT)
-  find_path(QXTCORE_INCLUDE_DIRS qxtglobal.h PATH_SUFFIXES qt5/QxtCore)
-  find_path(QXTGUI_INCLUDE_DIRS qxtglobalshortcut.h PATH_SUFFIXES qt5/QxtWidgets)
+  # Untested under Qt6 - see the equivalent note on USE_SYSTEM_QTSINGLEAPPLICATION.
+  find_path(QXTCORE_INCLUDE_DIRS qxtglobal.h PATH_SUFFIXES qt6/QxtCore)
+  find_path(QXTGUI_INCLUDE_DIRS qxtglobalshortcut.h PATH_SUFFIXES qt6/QxtWidgets)
   set(QXT_INCLUDE_DIRS ${QXTCORE_INCLUDE_DIRS} ${QXTGUI_INCLUDE_DIRS})
   # We only need its header. We don't need to link to QxtCore.
-  find_library(QXT_LIBRARIES QxtWidgets-qt5)
+  find_library(QXT_LIBRARIES QxtWidgets-qt6)
 else (USE_SYSTEM_QXT)
   add_definitions(-DQXT_STATIC -DBUILD_QXT_GUI -DBUILD_QXT_CORE)
   set(QXT_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/qxt)

@@ -41,7 +41,6 @@
 #include "core/utilities.h"
 #include "core/waitforsignal.h"
 #include "internet/core/internetmodel.h"
-#include "internet/lastfm/fixlastfm.h"
 #include "internet/podcasts/podcastparser.h"
 #include "internet/podcasts/podcastservice.h"
 #include "internet/podcasts/podcasturlloader.h"
@@ -246,7 +245,7 @@ SongLoader::Result SongLoader::LoadLocalAsync(const QString& filename) {
   if (QFile::exists(matching_cue)) {
     // it's a cue - create virtual tracks
     QFile cue(matching_cue);
-    cue.open(QIODevice::ReadOnly);
+    (void)cue.open(QIODevice::ReadOnly);
 
     SongList song_list = cue_parser_->Load(&cue, matching_cue,
                                            QDir(filename.section('/', 0, -2)));
@@ -433,7 +432,13 @@ SongLoader::Result SongLoader::LoadRemote() {
 
   // Wait until loading is finished
   loop.exec();
-  return Success;
+
+  // success_ is what StopTypefindAsync() recorded for how the pipeline
+  // actually ended. Returning Success unconditionally here hid every remote
+  // failure - a load that errored out leaves songs_ empty, so the caller
+  // inserted nothing and never learned why. Report it so SongLoaderInserter
+  // emits Error() and the message reaches the UI (and --play-and-exit).
+  return success_ ? Success : Error;
 }
 
 void SongLoader::TypeFound(GstElement*, uint, GstCaps* caps, void* self) {

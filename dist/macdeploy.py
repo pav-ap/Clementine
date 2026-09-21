@@ -15,27 +15,51 @@
 #  You should have received a copy of the GNU General Public License
 #  along with Clementine.  If not, see <http://www.gnu.org/licenses/>.
 
-from distutils import spawn
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import traceback
 
 LOGGER = logging.getLogger('macdeploy')
 
+
+def GetHomebrewPrefixes():
+  # Apple Silicon uses /opt/homebrew, Intel uses /usr/local; support both so
+  # this script doesn't need to know which one built the dependencies.
+  prefixes = []
+  env_prefix = os.environ.get('HOMEBREW_PREFIX')
+  if env_prefix:
+    prefixes.append(env_prefix)
+  for candidate in ('/opt/homebrew', '/usr/local'):
+    if candidate not in prefixes and os.path.isdir(candidate):
+      prefixes.append(candidate)
+  return prefixes or ['/usr/local']
+
+
+HOMEBREW_PREFIXES = GetHomebrewPrefixes()
+
 FRAMEWORK_SEARCH_PATH = [
     '/target', '/target/lib', '/Library/Frameworks',
     os.path.join(os.environ['HOME'], 'Library/Frameworks')
+] + [
+    # Homebrew's "qt" formula symlinks every Qt module's framework bundle
+    # into its own lib/ dir (e.g. opt/qt/lib/QtCore.framework), regardless
+    # of which per-module formula (qtbase, qtsvg, ...) actually owns it.
+    os.path.join(prefix, 'opt/qt/lib') for prefix in HOMEBREW_PREFIXES
 ]
 
 STRIP_PREFIX = [
     '@@HOMEBREW_PREFIX@@/opt/qt5/lib/',
     '@@HOMEBREW_CELLAR@@/qt5/5.8.0_1/lib/',
+    '@rpath/',
 ]
 
-LIBRARY_SEARCH_PATH = ['/target', '/target/lib', '/usr/local/lib', '/sw/lib']
+LIBRARY_SEARCH_PATH = ['/target', '/target/lib', '/sw/lib'] + [
+    os.path.join(prefix, 'lib') for prefix in HOMEBREW_PREFIXES
+]
 
 GSTREAMER_PLUGINS = [
     # Core plugins
@@ -88,11 +112,15 @@ GSTREAMER_PLUGINS = [
 ]
 
 GSTREAMER_SEARCH_PATH = [
-    '/usr/local/lib/gstreamer-1.0',
     '/target/lib/gstreamer-1.0',
     '/target/libexec/gstreamer-1.0',
-    '/usr/local/opt/gstreamer/libexec/gstreamer-1.0',
 ]
+for _prefix in HOMEBREW_PREFIXES:
+  GSTREAMER_SEARCH_PATH += [
+      os.path.join(_prefix, 'lib/gstreamer-1.0'),
+      os.path.join(_prefix, 'opt/gstreamer/lib/gstreamer-1.0'),
+      os.path.join(_prefix, 'opt/gstreamer/libexec/gstreamer-1.0'),
+  ]
 
 QT_PLUGINS = [
     #'accessible/libqtaccessiblewidgets.dylib',
@@ -108,27 +136,39 @@ QT_PLUGINS = [
     'imageformats/libqsvg.dylib',
     'platforms/libqcocoa.dylib',
     'styles/libqmacstyle.dylib',
+    # Qt6 moved TLS support out of QtNetwork and into a plugin. Without one
+    # bundled, every HTTPS request (cover art, Last.fm, podcasts, internet
+    # radio) silently fails with "No functional TLS backend was found".
+    # libqsecuretransportbackend uses macOS's native Security framework, so
+    # unlike libqopensslbackend it needs no separate OpenSSL dylibs bundled
+    # alongside it.
+    'tls/libqsecuretransportbackend.dylib',
 ]
-QT_PLUGINS_SEARCH_PATH = [
-    '/usr/local/opt/qt5/plugins',
-    '/target/plugins',
-    '/usr/local/Trolltech/Qt-4.7.0/plugins',
-    '/Developer/Applications/Qt/plugins',
-]
+QT_PLUGINS_SEARCH_PATH = ['/target/plugins']
+for _prefix in HOMEBREW_PREFIXES:
+  QT_PLUGINS_SEARCH_PATH += [
+      # Homebrew's Qt6 formulas each keep their own plugins under their own
+      # keg's share/qt/plugins (e.g. qtbase owns platforms/styles/most
+      # imageformats, qtsvg owns iconengines/svg) rather than one aggregated
+      # plugins/ dir like Qt5's qt@5 formula had.
+      os.path.join(_prefix, 'opt/qtbase/share/qt/plugins'),
+      os.path.join(_prefix, 'opt/qtsvg/share/qt/plugins'),
+      os.path.join(_prefix, 'opt/qt@5/plugins'),
+      os.path.join(_prefix, 'opt/qt5/plugins'),
+  ]
 
-GIO_MODULES_SEARCH_PATH = [
-  '/usr/local/lib/gio/modules',
-  '/target/lib/gio/modules',
+GIO_MODULES_SEARCH_PATH = ['/target/lib/gio/modules'] + [
+    os.path.join(prefix, 'lib/gio/modules') for prefix in HOMEBREW_PREFIXES
 ]
 
 INSTALL_NAME_TOOL_APPLE = 'install_name_tool'
 INSTALL_NAME_TOOL_CROSS = 'x86_64-apple-darwin-%s' % INSTALL_NAME_TOOL_APPLE
-INSTALL_NAME_TOOL = INSTALL_NAME_TOOL_CROSS if spawn.find_executable(
+INSTALL_NAME_TOOL = INSTALL_NAME_TOOL_CROSS if shutil.which(
     INSTALL_NAME_TOOL_CROSS) else INSTALL_NAME_TOOL_APPLE
 
 OTOOL_APPLE = 'otool'
 OTOOL_CROSS = 'x86_64-apple-darwin-%s' % OTOOL_APPLE
-OTOOL = OTOOL_CROSS if spawn.find_executable(OTOOL_CROSS) else OTOOL_APPLE
+OTOOL = OTOOL_CROSS if shutil.which(OTOOL_CROSS) else OTOOL_APPLE
 
 
 class Error(Exception):
@@ -173,11 +213,25 @@ bundle_name = os.path.basename(bundle_dir).split('.')[0]
 commands = []
 
 frameworks_dir = os.path.join(bundle_dir, 'Contents', 'Frameworks')
-commands.append(['mkdir', '-p', frameworks_dir])
 resources_dir = os.path.join(bundle_dir, 'Contents', 'Resources')
-commands.append(['mkdir', '-p', resources_dir])
 plugins_dir = os.path.join(bundle_dir, 'Contents', 'PlugIns')
 binary = os.path.join(bundle_dir, 'Contents', 'MacOS', bundle_name)
+
+# This script's own commands (cp/ln -sf) aren't idempotent against a
+# Frameworks/PlugIns tree it already populated on a previous run: copying a
+# framework's Resources into a destination that already has one, or
+# re-linking Versions/Current on top of an existing chain, can produce
+# self-referential entries (e.g. Versions/A/A) or symlink loops ("too many
+# levels of symbolic links") instead of just overwriting cleanly. Wipe and
+# recreate them fresh on every run rather than trying to merge into
+# whatever's already there. Not resources_dir - that's also where `make
+# install` places icons/Info.plist/etc. before this script runs, and this
+# script only ever adds to it (qt_menu.nib, framework Info.plists), never
+# removes, so it doesn't have the same stale-content problem.
+subprocess.check_call(['rm', '-rf', frameworks_dir])
+subprocess.check_call(['rm', '-rf', plugins_dir])
+commands.append(['mkdir', '-p', frameworks_dir])
+commands.append(['mkdir', '-p', resources_dir])
 
 fixed_libraries = set()
 fixed_frameworks = set()
@@ -208,7 +262,10 @@ def GetBrokenLibraries(binary):
       # Potentially already fixed library
       relative_path = os.path.join(*line.split('/')[3:])
       if not os.path.exists(os.path.join(frameworks_dir, relative_path)):
-        broken_libs['frameworks'].append(relative_path)
+        if re.search(r'\w+\.framework', line):
+          broken_libs['frameworks'].append(relative_path)
+        else:
+          broken_libs['libs'].append(relative_path)
     elif re.search(r'\w+\.framework', line):
       broken_libs['frameworks'].append(line)
     else:
@@ -231,9 +288,98 @@ def FindFramework(path):
   raise CouldNotFindFrameworkError(path)
 
 
-def FindLibrary(path):
+def GetRPaths(binary):
+  output = subprocess.Popen(
+      [OTOOL, '-l', binary], stdout=subprocess.PIPE).communicate()[0].decode('utf-8')
+  lines = output.split('\n')
+  rpaths = []
+  for i, line in enumerate(lines):
+    if line.strip() == 'cmd LC_RPATH':
+      for candidate in lines[i:i + 5]:
+        m = re.match(r'\s*path (.*) \(offset \d+\)', candidate)
+        if m:
+          rpaths.append(m.group(1))
+          break
+  return rpaths
+
+
+def ResolveRPath(path, referencing_binary):
+  # @rpath entries are resolved against the LC_RPATH commands of the binary
+  # that references them - most commonly @loader_path, meaning "the
+  # directory containing the referencing binary itself".
+  suffix = path[len('@rpath/'):]
+  for rpath in GetRPaths(referencing_binary):
+    if rpath.startswith('@loader_path'):
+      rpath_dir = os.path.normpath(os.path.join(
+          os.path.dirname(referencing_binary), rpath[len('@loader_path'):].lstrip('/')))
+    elif rpath.startswith('@'):
+      continue  # @executable_path etc. isn't meaningful pre-bundling.
+    else:
+      rpath_dir = rpath
+    candidate = os.path.join(rpath_dir, suffix)
+    if os.path.exists(candidate):
+      return candidate
+  return None
+
+
+def FixAbsoluteRPaths(source_path, target_path):
+  # Every LC_LOAD_DYLIB dependency gets rewritten to an @executable_path-
+  # relative path above, but a binary's LC_RPATH *search* entries are left
+  # untouched by that - so an absolute one (always a leftover from the
+  # original Homebrew build, eg. "/opt/homebrew/opt/libsoup/lib") survives
+  # straight into the bundle. That's inert for the dependencies we already
+  # rewrote, but it's live ammunition for anything that does a bare-filename
+  # dlopen() at runtime instead of linking normally (eg. GStreamer's
+  # libgstsoup plugin probing for "libsoup-3.0.0.dylib"/"libsoup-2.4.1.dylib"
+  # to pick a libsoup major version) - dyld resolves that search via the
+  # loading binary's own rpaths, lands on the unrelinked Homebrew copy, and
+  # that copy in turn pulls in Homebrew's own glib/gobject/gio/gmodule
+  # straight from the Cellar. Two independent copies of glib's GObject type
+  # registry end up loaded in the same process, which is what produces the
+  # "class/signal/property already implemented" GLib-GObject warnings and
+  # silently breaks anything downstream of it.
+  #
+  # Rather than just deleting these, redirect the first one to
+  # "@executable_path/../Frameworks" (deleting any further ones, since
+  # install_name_tool refuses to add a second identical rpath) - a bare
+  # dlopen() like libgstsoup's above still needs *some* rpath to find its
+  # (now bundled and relinked) dependency by leaf name; pointing that search
+  # at our own Frameworks dir keeps it working without reaching outside the
+  # bundle. Computed from source_path since target_path may only exist once
+  # the queued `cp` command above actually runs.
+  bundle_rpath = '@executable_path/../Frameworks'
+  existing_rpaths = GetRPaths(source_path)
+  have_bundle_rpath = bundle_rpath in existing_rpaths
+  changed = False
+  for rpath in existing_rpaths:
+    if rpath.startswith('@'):
+      continue
+    changed = True
+    if have_bundle_rpath:
+      LOGGER.info("Removing stale absolute rpath '%s' from '%s'", rpath,
+                  target_path)
+      commands.append(
+          [INSTALL_NAME_TOOL, '-delete_rpath', rpath, target_path])
+    else:
+      LOGGER.info("Redirecting stale absolute rpath '%s' to '%s' in '%s'",
+                  rpath, bundle_rpath, target_path)
+      commands.append(
+          [INSTALL_NAME_TOOL, '-rpath', rpath, bundle_rpath, target_path])
+      have_bundle_rpath = True
+  if changed:
+    # -rpath/-delete_rpath invalidate any existing code signature.
+    commands.append(['codesign', '--force', '-s', '-', target_path])
+
+
+def FindLibrary(path, referencing_binary=None):
   if os.path.exists(path):
     return path
+  if path.startswith('@rpath/') and referencing_binary:
+    resolved = ResolveRPath(path, referencing_binary)
+    if resolved:
+      LOGGER.debug("Found library '%s' via rpath of '%s'", path,
+                    referencing_binary)
+      return resolved
   for search_path in LIBRARY_SEARCH_PATH:
     abs_path = os.path.join(search_path, path)
     if os.path.exists(abs_path):
@@ -243,21 +389,28 @@ def FindLibrary(path):
   raise CouldNotFindFrameworkError(path)
 
 
-def FixAllLibraries(broken_libs):
+def FixAllLibraries(broken_libs, referencing_binary=None):
   for framework in broken_libs['frameworks']:
     FixFramework(framework)
   for lib in broken_libs['libs']:
-    FixLibrary(lib)
+    FixLibrary(lib, referencing_binary)
 
 
 def FixFramework(path):
-  if path in fixed_frameworks:
+  abs_path = FindFramework(path)
+  # Homebrew paths often reach the same real framework through different
+  # symlinked prefixes (e.g. .../opt/qt@5/... vs .../Cellar/qt@5/5.x/...),
+  # so dedupe by real path rather than the literal string - otherwise the
+  # same framework gets copied twice, and the interleaved copy/symlink
+  # commands from the two passes can corrupt each other's output (e.g.
+  # produce a self-referential Versions/5/5 symlink).
+  real_path = os.path.realpath(abs_path)
+  if real_path in fixed_frameworks:
     return
   else:
-    fixed_frameworks.add(path)
-  abs_path = FindFramework(path)
+    fixed_frameworks.add(real_path)
   broken_libs = GetBrokenLibraries(abs_path)
-  FixAllLibraries(broken_libs)
+  FixAllLibraries(broken_libs, abs_path)
 
   new_path = CopyFramework(abs_path)
   id = os.sep.join(new_path.split(os.sep)[3:])
@@ -266,17 +419,20 @@ def FixFramework(path):
     FixFrameworkInstallPath(framework, new_path)
   for library in broken_libs['libs']:
     FixLibraryInstallPath(library, new_path)
+  FixAbsoluteRPaths(abs_path, new_path)
 
 
-def FixLibrary(path):
-  if path in fixed_libraries or FindSystemLibrary(os.path.basename(
-      path)) is not None:
+def FixLibrary(path, referencing_binary=None):
+  if FindSystemLibrary(os.path.basename(path)) is not None:
+    return
+  abs_path = FindLibrary(path, referencing_binary)
+  real_path = os.path.realpath(abs_path)
+  if real_path in fixed_libraries:
     return
   else:
-    fixed_libraries.add(path)
-  abs_path = FindLibrary(path)
+    fixed_libraries.add(real_path)
   broken_libs = GetBrokenLibraries(abs_path)
-  FixAllLibraries(broken_libs)
+  FixAllLibraries(broken_libs, abs_path)
 
   new_path = CopyLibrary(abs_path)
   FixLibraryId(new_path)
@@ -284,26 +440,29 @@ def FixLibrary(path):
     FixFrameworkInstallPath(framework, new_path)
   for library in broken_libs['libs']:
     FixLibraryInstallPath(library, new_path)
+  FixAbsoluteRPaths(abs_path, new_path)
 
 
 def FixPlugin(abs_path, subdir):
   broken_libs = GetBrokenLibraries(abs_path)
-  FixAllLibraries(broken_libs)
+  FixAllLibraries(broken_libs, abs_path)
 
   new_path = CopyPlugin(abs_path, subdir)
   for framework in broken_libs['frameworks']:
     FixFrameworkInstallPath(framework, new_path)
   for library in broken_libs['libs']:
     FixLibraryInstallPath(library, new_path)
+  FixAbsoluteRPaths(abs_path, new_path)
 
 
 def FixBinary(path):
   broken_libs = GetBrokenLibraries(path)
-  FixAllLibraries(broken_libs)
+  FixAllLibraries(broken_libs, path)
   for framework in broken_libs['frameworks']:
     FixFrameworkInstallPath(framework, path)
   for library in broken_libs['libs']:
     FixLibraryInstallPath(library, path)
+  FixAbsoluteRPaths(path, path)
 
 
 def CopyLibrary(path):
@@ -352,7 +511,16 @@ def CopyFramework(src_binary):
   #   QtCore has Resources/qt_menu.nib (copy to app's Resources)
   #   Sparkle has Resources/*
   #   Qt* have Resources/Info.plist
-  resources_src = os.path.join(src_base, 'Resources')
+  #
+  # Deliberately os.path.join(src_base, 'Versions', version, 'Resources')
+  # rather than os.path.join(src_base, 'Resources'): the latter goes through
+  # the framework's top-level "Resources -> Versions/Current/Resources"
+  # symlink, which - since dest_dir below is this same framework's own
+  # Versions/<version> directory - can make `cp -r` copy part of the
+  # framework's own Versions/<version> tree into itself (e.g. a
+  # self-referential Versions/A/A or a nested Resources/Resources symlink).
+  # Using the already-resolved version dir directly sidesteps that.
+  resources_src = os.path.join(src_base, 'Versions', version, 'Resources')
   menu_nib = os.path.join(resources_src, 'qt_menu.nib')
   if os.path.exists(menu_nib):
     LOGGER.info("Copying qt_menu.nib '%s'", menu_nib)
@@ -466,6 +634,66 @@ def FindGioModule(name):
   raise CouldNotFindGioModuleError(name)
 
 
+def PatchGioModuleDefaultDir(bundle_dir):
+  # The bundled libgio is a straight copy of Homebrew's own build, so it
+  # carries Homebrew's install prefix baked in as its compiled-in *default*
+  # GIO module directory (eg. "/opt/homebrew/lib/gio/modules") - this is a
+  # plain C string constant, not something main.cpp's GIO_EXTRA_MODULES env
+  # var (which only *adds* a search directory) can override or suppress.
+  # At startup GIO scans both directories unconditionally, finds Homebrew's
+  # own glib-networking module in its default dir, and loads it - pulling
+  # in the *system* libgio-2.0.0.dylib as that module's own dependency
+  # alongside the bundled one. Two copies of glib's GObject type registry
+  # in one process causes exactly the "signal invalid for this instance
+  # type" / "no property named" GLib-GObject errors, silently breaking
+  # anything that goes through the GIO-based TLS backend (eg. HTTPS
+  # streaming via souphttpsrc) despite no visible error.
+  #
+  # Neutralise it the way other GTK-on-macOS bundlers handle this: patch
+  # that one compiled-in path string in place to something that resolves
+  # to no modules at all, so the mandatory default-directory scan just
+  # finds nothing there.
+  path = os.path.join(frameworks_dir, 'libgio-2.0.0.dylib')
+  if not os.path.exists(path):
+    return
+
+  with open(path, 'rb') as f:
+    data = bytearray(f.read())
+
+  replacement = b'/dev/null\x00'
+  patched = False
+  for prefix in HOMEBREW_PREFIXES:
+    target = ('%s/lib/gio/modules' % prefix).encode('utf-8') + b'\x00'
+    idx = data.find(target)
+    if idx == -1:
+      continue
+    if len(replacement) > len(target):
+      LOGGER.warning(
+          "Can't patch GIO module dir in '%s': replacement string longer "
+          'than target (%d > %d)', path, len(replacement), len(target))
+      continue
+    padded = replacement + b'\x00' * (len(target) - len(replacement))
+    data[idx:idx + len(target)] = padded
+    patched = True
+    LOGGER.info("Patched default GIO module dir in '%s' (was '%s')", path,
+               target.decode('utf-8').rstrip('\x00'))
+
+  if not patched:
+    LOGGER.warning(
+        "Could not find a Homebrew GIO module dir string to patch in '%s' "
+        '(searched prefixes: %s) - if HTTPS streaming misbehaves with '
+        'GLib-GObject warnings about GVolumeMonitor/GLocalFileMonitor, '
+        "this is why.", path, HOMEBREW_PREFIXES)
+    return
+
+  with open(path, 'wb') as f:
+    f.write(data)
+
+  # Binary-patching the file's contents invalidates any existing code
+  # signature; re-sign ad-hoc so it still loads.
+  subprocess.check_call(['codesign', '--force', '-s', '-', path])
+
+
 def main():
   logging.basicConfig(
       filename='macdeploy.log',
@@ -479,6 +707,14 @@ def main():
 
   FixPlugin(FindGstreamerPlugin('gst-plugin-scanner'), '.')
   FixPlugin(FindGioModule('libgiognutls.so'), 'gio-modules')
+
+  # libgstsoup.dylib doesn't declare libsoup as a normal LC_LOAD_DYLIB
+  # dependency - it dlopen()s "libsoup-3.0.0.dylib"/"libsoup-2.4.1.dylib" by
+  # bare filename at runtime, to pick whichever libsoup major version is
+  # available. That means GetBrokenLibraries() never sees it while walking
+  # libgstsoup's declared dependencies, so it has to be bundled explicitly
+  # here rather than being picked up automatically like everything else.
+  FixLibrary('libsoup-3.0.0.dylib')
 
   try:
     FixPlugin('clementine-spotifyblob', '.')
@@ -500,6 +736,11 @@ def main():
   for command in commands:
     p = subprocess.Popen(command)
     os.waitpid(p.pid, 0)
+
+  # Must run after the commands above: it needs libgio-2.0.0.dylib to
+  # already be sitting in frameworks_dir, which happens via a queued `cp`
+  # command like everything else copied here.
+  PatchGioModuleDefaultDir(bundle_dir)
 
 
 if __name__ == "__main__":

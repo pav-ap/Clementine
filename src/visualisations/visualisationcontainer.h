@@ -49,6 +49,9 @@ class VisualisationContainer : public QGraphicsView {
   static const int kDefaultTextureSize;
 
   void SetEngine(GstEngine* engine);
+
+  // The framebuffer Qt is currently drawing this widget into.
+  uint32_t CurrentFramebufferObject() const;
   void SetActions(QAction* previous, QAction* play_pause, QAction* stop,
                   QAction* next);
 
@@ -64,7 +67,7 @@ class VisualisationContainer : public QGraphicsView {
   void resizeEvent(QResizeEvent* e);
   void timerEvent(QTimerEvent* e);
   void mouseMoveEvent(QMouseEvent* e);
-  void enterEvent(QEvent* e);
+  void enterEvent(QEnterEvent* e);
   void leaveEvent(QEvent* e);
   void mouseDoubleClickEvent(QMouseEvent* e);
   void contextMenuEvent(QContextMenuEvent* event);

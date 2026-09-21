@@ -1,0 +1,31 @@
+type("developer_id")
+# Not actually meaningful for a Developer ID cert (it isn't app-specific
+# the way App Store provisioning is), but match requires *some* value here
+# regardless of cert type - Clementine's real bundle ID, from Info.plist.in.
+app_identifier("org.clementine-player.clementine")
+# Developer ID distribution (outside the App Store) doesn't use
+# provisioning profiles at all - without this, match tries to generate one
+# anyway and fails, since our app_identifier isn't a real registered App ID
+# in the portal (it doesn't need to be, for this cert type).
+skip_provisioning_profiles(true)
+# Defaults to true on macOS with Xcode 11+ and would create an unrelated
+# "Apple Development" cert alongside - we only want the Developer ID one.
+generate_apple_certs(false)
+
+storage_mode("google_cloud")
+google_cloud_bucket_name("clementine-macos-signing")
+# Without this, match only checks for Application Default Credentials (set
+# up via `gcloud auth application-default login` locally, or Workload
+# Identity Federation in CI - see dist/CODE_SIGNING.md) when it knows the
+# project ID; otherwise it jumps straight to an interactive
+# "create a gc_keys.json" prompt, which crashes non-interactive CI runs.
+google_cloud_project_id("clementine-data")
+# Even after finding ADC, match still asks an interactive
+# "use these credentials?" confirmation unless told not to - same reasoning
+# as above.
+skip_google_cloud_account_confirmation(true)
+
+# Apple Developer Team ID (Membership page on developer.apple.com). Same
+# value locally (export FASTLANE_TEAM_ID=... in your shell profile) and in
+# CI (see dist/CODE_SIGNING.md).
+team_id(ENV["FASTLANE_TEAM_ID"])

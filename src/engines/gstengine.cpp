@@ -29,7 +29,6 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
-#include <QRegExp>
 #include <QSettings>
 #include <QTimeLine>
 #include <QTimer>
@@ -160,12 +159,37 @@ bool GstEngine::Init() {
     qputenv("GST_DEBUG_DUMP_DOT_DIR", path);
   }
 
-  initialising_ = QtConcurrent::run(this, &GstEngine::InitialiseGstreamer);
+  initialising_ = QtConcurrent::run(&GstEngine::InitialiseGstreamer, this);
   return true;
 }
 
+void GstEngine::EnsureInitialised() {
+  initialising_.waitForFinished();
+
+  // gst_init() aborts the process itself when it fails; gst_init_check() hands
+  // the failure back so the decision is ours. It's still fatal - there is no
+  // usable audio engine without gstreamer - but it's our message and our exit,
+  // and it happens somewhere we can reason about rather than inside a library.
+  if (!initialisation_error_.isEmpty()) {
+    qFatal("Error initialising audio engine: %s",
+           initialisation_error_.toLocal8Bit().constData());
+  }
+}
+
 void GstEngine::InitialiseGstreamer() {
-  gst_init(nullptr, nullptr);
+  GError* error = nullptr;
+  if (!gst_init_check(nullptr, nullptr, &error)) {
+    initialisation_error_ = error && error->message
+                                ? QString::fromUtf8(error->message)
+                                : QString("gst_init_check() failed");
+    if (error) g_error_free(error);
+    qLog(Error) << "gstreamer initialisation failed:" << initialisation_error_;
+    // Nothing below here is meaningful without an initialised gstreamer, but
+    // still fall through to the emit: it reports that the spawning phase is
+    // over, which the tagreader pool is waiting on either way.
+    emit Initialised();
+    return;
+  }
 
   gst_pb_utils_init();
 
@@ -218,6 +242,8 @@ void GstEngine::InitialiseGstreamer() {
 
     device_finders_.append(finder);
   }
+
+  emit Initialised();
 }
 
 void GstEngine::ReloadSettings() {
@@ -465,10 +491,10 @@ void GstEngine::StartFadeoutPause() {
 
   fadeout_pause_pipeline_->StartFader(fadeout_pause_duration_nanosec_,
                                       QTimeLine::Backward,
-                                      QTimeLine::EaseInOutCurve, false);
+                                      QEasingCurve::InOutQuad, false);
   if (fadeout_pipeline_ && fadeout_pipeline_->state() == GST_STATE_PLAYING) {
     fadeout_pipeline_->StartFader(fadeout_pause_duration_nanosec_,
-                                  QTimeLine::Backward, QTimeLine::LinearCurve,
+                                  QTimeLine::Backward, QEasingCurve::Linear,
                                   false);
   }
   connect(fadeout_pause_pipeline_.get(), SIGNAL(FaderFinished()),
@@ -584,7 +610,7 @@ void GstEngine::Pause() {
   if (is_fading_out_to_pause_) {
     disconnect(current_pipeline_.get(), SIGNAL(FaderFinished()), 0, 0);
     current_pipeline_->StartFader(fadeout_pause_duration_nanosec_,
-                                  QTimeLine::Forward, QTimeLine::EaseInOutCurve,
+                                  QTimeLine::Forward, QEasingCurve::InOutQuad,
                                   false);
     is_fading_out_to_pause_ = false;
     has_faded_out_ = false;
@@ -615,8 +641,8 @@ void GstEngine::Unpause() {
     if (has_faded_out_) {
       disconnect(current_pipeline_.get(), SIGNAL(FaderFinished()), 0, 0);
       current_pipeline_->StartFader(fadeout_pause_duration_nanosec_,
-                                    QTimeLine::Forward,
-                                    QTimeLine::EaseInOutCurve, false);
+                                    QTimeLine::Forward, QEasingCurve::InOutQuad,
+                                    false);
       has_faded_out_ = false;
     }
 
@@ -720,7 +746,7 @@ void GstEngine::HandlePipelineError(int pipeline_id, const QString& message,
 
   // try to reload the URL in case of a drop of the connection
   if (domain == GST_RESOURCE_ERROR && error_code == GST_RESOURCE_ERROR_SEEK) {
-    if (Load(playback_req_, 0, false, 0, 0)) {
+    if (Load(playback_req_, Engine::TrackChangeFlags(), false, 0, 0)) {
       current_pipeline_->SetState(GST_STATE_PLAYING);
 
       return;

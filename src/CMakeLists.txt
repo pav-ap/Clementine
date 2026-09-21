@@ -15,6 +15,25 @@ if(BUILD_WERROR)
   endif (LINUX)
 endif(BUILD_WERROR)
 
+# GCC 15 miscomputes a bound (18446744073709551608, i.e. -8 as unsigned)
+# from pointer arithmetic on an empty container inside boost::multi_index's
+# bucket_array constructor, inlined into MergedProxyModelPrivate's
+# constructor - a known class of GCC false positive in heavily-templated
+# code, not a real bug. It's flagged under more than one warning name
+# (seen so far: -Wstringop-overflow, -Warray-bounds), so more may surface.
+# Scoped to just this file for normal compiles...
+set_source_files_properties(core/mergedproxymodel.cpp PROPERTIES
+  COMPILE_OPTIONS "-Wno-stringop-overflow;-Wno-array-bounds")
+# ...but distro-hardened Linux builds (e.g. Fedora's rpmbuild specs) also
+# enable LTO, which re-diagnoses the same inlined code at the final link
+# step using the linker's own flags - not the per-file COMPILE_OPTIONS
+# above - so the suppression has to be repeated here too, or LTO relinking
+# fails with the identical error despite every object file having compiled
+# cleanly.
+if (LINUX)
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wno-stringop-overflow -Wno-array-bounds")
+endif (LINUX)
+
 include_directories(${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
 include_directories(../3rdparty/gmock/gtest/include)
 
@@ -36,12 +55,8 @@ include_directories(${MYGPOQT5_INCLUDE_DIRS})
 if (HAVE_VISUALISATIONS)
   find_package(OpenGL REQUIRED)
   include_directories(${OPENGL_INCLUDE_DIR})
-  include_directories(${LIBPROJECTM_INCLUDE_DIRS})
 endif(HAVE_VISUALISATIONS)
 
-if(HAVE_LIBLASTFM)
-  include_directories(${LASTFM5_INCLUDE_DIRS})
-endif(HAVE_LIBLASTFM)
 
 if(HAVE_BREAKPAD)
   include_directories(../3rdparty/google-breakpad)
@@ -425,6 +440,7 @@ set(HEADERS
   analyzers/sonogram.h
   analyzers/turbine.h
 
+  core/appearance.h
   core/application.h
   core/backgroundstreams.h
   core/crashreporting.h
@@ -866,24 +882,28 @@ optional_source(HAVE_VISUALISATIONS
     visualisations/visualisationselector.ui
 )
 
-# Lastfm
-optional_source(HAVE_LIBLASTFM
-  SOURCES
-    covers/lastfmcoverprovider.cpp
-    internet/lastfm/fixlastfm.cpp
-    internet/lastfm/lastfmcompat.cpp
-    internet/lastfm/lastfmservice.cpp
-    internet/lastfm/lastfmsettingspage.cpp
-    songinfo/lastfmtrackinfoprovider.cpp
-    songinfo/tagwidget.cpp
-  HEADERS
-    covers/lastfmcoverprovider.h
-    internet/lastfm/lastfmservice.h
-    internet/lastfm/lastfmsettingspage.h
-    songinfo/lastfmtrackinfoprovider.h
-    songinfo/tagwidget.h
-  UI
-    internet/lastfm/lastfmsettingspage.ui
+# Lastfm - talks directly to the Last.fm web service API over
+# QNetworkAccessManager; no external library dependency, so unlike the other
+# optional_source blocks here, this one is unconditional.
+list(APPEND SOURCES
+  covers/lastfmcoverprovider.cpp
+  internet/lastfm/lastfmscrobblecache.cpp
+  internet/lastfm/lastfmservice.cpp
+  internet/lastfm/lastfmsettingspage.cpp
+  internet/lastfm/lastfmws.cpp
+  internet/lastfm/lastfmxmlquery.cpp
+  songinfo/lastfmtrackinfoprovider.cpp
+  songinfo/tagwidget.cpp
+)
+list(APPEND HEADERS
+  covers/lastfmcoverprovider.h
+  internet/lastfm/lastfmservice.h
+  internet/lastfm/lastfmsettingspage.h
+  songinfo/lastfmtrackinfoprovider.h
+  songinfo/tagwidget.h
+)
+list(APPEND UI
+  internet/lastfm/lastfmsettingspage.ui
 )
 
 # Platform specific - OS X
@@ -934,37 +954,37 @@ if(UNIX AND HAVE_DBUS)
   file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/dbus)
 
   # MPRIS 2.0 DBUS interfaces
-  qt5_add_dbus_adaptor(SOURCES
+  qt6_add_dbus_adaptor(SOURCES
       dbus/org.mpris.MediaPlayer2.Player.xml
       core/mpris2.h mpris::Mpris2 core/mpris2_player Mpris2Player)
-  qt5_add_dbus_adaptor(SOURCES
+  qt6_add_dbus_adaptor(SOURCES
       dbus/org.mpris.MediaPlayer2.xml
       core/mpris2.h mpris::Mpris2 core/mpris2_root Mpris2Root)
-  qt5_add_dbus_adaptor(SOURCES
+  qt6_add_dbus_adaptor(SOURCES
       dbus/org.mpris.MediaPlayer2.TrackList.xml
       core/mpris2.h mpris::Mpris2 core/mpris2_tracklist Mpris2TrackList)
 
   # MPRIS 2.1 DBUS interfaces
-  qt5_add_dbus_adaptor(SOURCES
+  qt6_add_dbus_adaptor(SOURCES
       dbus/org.mpris.MediaPlayer2.Playlists.xml
       core/mpris2.h mpris::Mpris2 core/mpris2_playlists Mpris2Playlists)
 
   # org.freedesktop.Notifications DBUS interface
-  qt5_add_dbus_interface(SOURCES
+  qt6_add_dbus_interface(SOURCES
       dbus/org.freedesktop.Notifications.xml
       dbus/notification)
 
   # org.gnome.SettingsDaemon interface
-  qt5_add_dbus_interface(SOURCES
+  qt6_add_dbus_interface(SOURCES
       dbus/org.gnome.SettingsDaemon.MediaKeys.xml
       dbus/gnomesettingsdaemon)
 
   # org.kde.KGlobalAccel interfaces
   # these are taken from the KGlobalAccel sources (LGPL 2.1)
-  qt5_add_dbus_interface(SOURCES
+  qt6_add_dbus_interface(SOURCES
           dbus/org.kde.KGlobalAccel.xml
           dbus/kglobalaccel)
-  qt5_add_dbus_interface(SOURCES
+  qt6_add_dbus_interface(SOURCES
           dbus/org.kde.kglobalaccel.Component.xml
           dbus/kglobalaccelcomponent)
 
@@ -1007,26 +1027,26 @@ if(UNIX AND HAVE_DBUS)
           PROPERTIES NO_NAMESPACE dbus/udisks2drive INCLUDE dbus/metatypes.h)
       set_source_files_properties(dbus/org.freedesktop.UDisks2.Job.xml
           PROPERTIES NO_NAMESPACE dbus/udisks2job INCLUDE dbus/metatypes.h)
-      qt5_add_dbus_interface(SOURCES
+      qt6_add_dbus_interface(SOURCES
           dbus/org.freedesktop.DBus.ObjectManager.xml
           dbus/objectmanager)
-      qt5_add_dbus_interface(SOURCES
+      qt6_add_dbus_interface(SOURCES
           dbus/org.freedesktop.UDisks2.Filesystem.xml
           dbus/udisks2filesystem)
-      qt5_add_dbus_interface(SOURCES
+      qt6_add_dbus_interface(SOURCES
           dbus/org.freedesktop.UDisks2.Block.xml
           dbus/udisks2block)
-      qt5_add_dbus_interface(SOURCES
+      qt6_add_dbus_interface(SOURCES
           dbus/org.freedesktop.UDisks2.Drive.xml
           dbus/udisks2drive)
-      qt5_add_dbus_interface(SOURCES
+      qt6_add_dbus_interface(SOURCES
           dbus/org.freedesktop.UDisks2.Job.xml
           dbus/udisks2job)
   endif(HAVE_UDISKS2)
 
   # Wiimotedev interface classes
   if(ENABLE_WIIMOTEDEV)
-    qt5_add_dbus_interface(SOURCES
+    qt6_add_dbus_interface(SOURCES
         dbus/org.wiimotedev.deviceEvents.xml
         dbus/wiimotedev)
   endif(ENABLE_WIIMOTEDEV)
@@ -1222,9 +1242,9 @@ optional_source(LINUX
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in
                ${CMAKE_CURRENT_BINARY_DIR}/version.h)
 
-qt5_wrap_cpp(MOC ${HEADERS})
-qt5_wrap_ui(UIC ${UI})
-qt5_add_resources(QRC ${RESOURCES})
+qt6_wrap_cpp(MOC ${HEADERS})
+qt6_wrap_ui(UIC ${UI})
+qt6_add_resources(QRC ${RESOURCES})
 
 if(HAVE_TRANSLATIONS)
   add_pot(POT
@@ -1284,10 +1304,6 @@ link_directories(
 if(HAVE_VISUALISATIONS)
   target_link_libraries(clementine_lib ${LIBPROJECTM_LIBRARIES})
 endif(HAVE_VISUALISATIONS)
-
-if(HAVE_LIBLASTFM)
-  target_link_libraries(clementine_lib ${LASTFM5_LIBRARIES})
-endif(HAVE_LIBLASTFM)
 
 if(HAVE_LIBGPOD)
   link_directories(${LIBGPOD_LIBRARY_DIRS})
@@ -1357,6 +1373,7 @@ if (WIN32)
     protobuf
     tinysvcmdns
     dsound
+    dwmapi
   )
 endif (WIN32)
 
@@ -1424,6 +1441,14 @@ if (APPLE)
   install(FILES ../dist/cacert.pem
     DESTINATION "${CMAKE_BINARY_DIR}/clementine.app/Contents/Resources")
 
+  # projectM presets, fetched by CI. Optional, so a local build without them
+  # still configures; the app falls back to projectM's built-in idle preset.
+  if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/libprojectm/presets-cream")
+    install(DIRECTORY ../3rdparty/libprojectm/presets-cream/
+      DESTINATION "${CMAKE_BINARY_DIR}/clementine.app/Contents/Resources/projectm-presets"
+      FILES_MATCHING PATTERN "*.milk")
+  endif()
+
   if (HAVE_BREAKPAD)
     install(DIRECTORY
         ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/google-breakpad/client/mac/build/Release/Breakpad.framework
@@ -1437,12 +1462,32 @@ if (APPLE)
                                                   WORLD_READ WORLD_EXECUTE)
   endif (HAVE_BREAKPAD)
 
+  # macdeploy.py's install_name_tool rewrites invalidate whatever ad-hoc
+  # signature Homebrew shipped on each copied dylib/framework. On Apple
+  # Silicon the kernel refuses to load any Mach-O with an invalid (not just
+  # missing) signature, so the app is unlaunchable until everything is
+  # re-signed - even just ad-hoc, with no Developer ID configured. That's
+  # why codesign.py always runs here, not only when producing a
+  # distributable build.
+  if (APPLE_DEVELOPER_ID)
+    set(CLEMENTINE_CODESIGN_IDENTITY ${APPLE_DEVELOPER_ID})
+  else()
+    set(CLEMENTINE_CODESIGN_IDENTITY "-")
+  endif()
+
   if (USE_BUNDLE)
     add_custom_command(TARGET clementine
       POST_BUILD
       COMMAND
       ${CMAKE_CURRENT_SOURCE_DIR}/../dist/macdeploy.py ${PROJECT_BINARY_DIR}/clementine.app -f
+      COMMAND
+      ${CMAKE_CURRENT_SOURCE_DIR}/../dist/codesign.py ${CLEMENTINE_CODESIGN_IDENTITY} ${PROJECT_BINARY_DIR}/clementine.app ${CMAKE_CURRENT_SOURCE_DIR}/../dist/entitlements.plist
       WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+      # Real Developer ID identities look like "Developer ID Application:
+      # Name (TEAMID)" - without VERBATIM, CMake's Makefile generator
+      # doesn't reliably shell-escape the parentheses in that string, which
+      # breaks the generated `sh -c` command with a syntax error.
+      VERBATIM
     )
   endif(USE_BUNDLE)
 
@@ -1455,16 +1500,45 @@ if (APPLE)
   add_custom_target(clementine-breakpad
     DEPENDS ${PROJECT_BINARY_DIR}/clementine.breakpad)
 
-  if (APPLE_DEVELOPER_ID)
-    add_custom_target(
-      sign
-      COMMAND
-      ${PROJECT_SOURCE_DIR}/dist/codesign.py ${APPLE_DEVELOPER_ID} ${PROJECT_BINARY_DIR}/clementine.app
-      DEPENDS clementine
-      VERBATIM
-    )
-  endif()
+  # `clementine` is already signed with APPLE_DEVELOPER_ID (or ad-hoc, see
+  # above) as part of its own POST_BUILD step. APPLE_NOTARIZE_API_KEY_PATH
+  # (path to an App Store Connect API key JSON file, see dist/notarize.py)
+  # additionally submits the signed app/dmg to Apple's notary service and
+  # staples the ticket - required for the app to run cleanly on other
+  # people's Macs.
+  # Both cache vars are optional - without them `make dmg` still produces a
+  # (locally-runnable, ad-hoc-signed) dmg for other devs without a
+  # certificate.
 
+  # `sign` re-seals the app bundle with whatever identity is configured
+  # (ad-hoc by default, same as the POST_BUILD step above). It's always
+  # defined, not just when APPLE_DEVELOPER_ID is set, because `make install`
+  # (which copies clementine.icns/qt.conf/cacert.pem/sparkle_pub.pem into
+  # Contents/Resources) adds files to the bundle *after* POST_BUILD already
+  # sealed it, invalidating that signature - so packaging needs to re-sign
+  # after install, and this target is what does that (and also serves as a
+  # manual re-sign-without-rebuild convenience for local dev).
+  add_custom_target(
+    sign
+    COMMAND
+    ${PROJECT_SOURCE_DIR}/dist/codesign.py ${CLEMENTINE_CODESIGN_IDENTITY} ${PROJECT_BINARY_DIR}/clementine.app ${PROJECT_SOURCE_DIR}/dist/entitlements.plist
+    DEPENDS clementine
+    VERBATIM
+  )
+  set(CLEMENTINE_APP_TARGET sign)
+
+  if (APPLE_DEVELOPER_ID)
+    if (APPLE_NOTARIZE_API_KEY_PATH)
+      add_custom_target(
+        notarize-app
+        COMMAND
+        ${PROJECT_SOURCE_DIR}/dist/notarize.py ${APPLE_NOTARIZE_API_KEY_PATH} ${PROJECT_BINARY_DIR}/clementine.app
+        DEPENDS sign
+        VERBATIM
+      )
+      set(CLEMENTINE_APP_TARGET notarize-app)
+    endif()
+  endif()
 
   add_custom_command(
     OUTPUT ${PROJECT_BINARY_DIR}/clementine-${CLEMENTINE_VERSION_SPARKLE}.dmg
@@ -1473,11 +1547,21 @@ if (APPLE)
     COMMAND ${CMAKE_COMMAND} -E rename
       ${PROJECT_BINARY_DIR}/clementine.dmg
       ${PROJECT_BINARY_DIR}/clementine-${CLEMENTINE_VERSION_SPARKLE}.dmg
-    DEPENDS clementine
+    DEPENDS ${CLEMENTINE_APP_TARGET}
     WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
   )
   add_custom_target(dmg
     DEPENDS ${PROJECT_BINARY_DIR}/clementine-${CLEMENTINE_VERSION_SPARKLE}.dmg)
+
+  if (APPLE_NOTARIZE_API_KEY_PATH)
+    add_custom_target(
+      notarize-dmg
+      COMMAND
+      ${PROJECT_SOURCE_DIR}/dist/notarize.py ${APPLE_NOTARIZE_API_KEY_PATH} ${PROJECT_BINARY_DIR}/clementine-${CLEMENTINE_VERSION_SPARKLE}.dmg
+      DEPENDS dmg
+      VERBATIM
+    )
+  endif()
 else (APPLE)
   install(TARGETS clementine
     RUNTIME DESTINATION bin

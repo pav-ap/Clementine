@@ -17,14 +17,17 @@
 
 #include "visualisationcontainer.h"
 
-#include <QGLWidget>
+#include <QActionGroup>
 #include <QGraphicsProxyWidget>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMenu>
 #include <QMessageBox>
+#include <QOpenGLContext>
+#include <QOpenGLWidget>
 #include <QSettings>
 #include <QShortcut>
+#include <QSurfaceFormat>
 #include <QtDebug>
 
 #include "config.h"
@@ -79,7 +82,8 @@ void VisualisationContainer::Init() {
 
   // Set up the graphics view
   setScene(vis_);
-  setViewport(new QGLWidget(QGLFormat(QGL::SampleBuffers)));
+  QOpenGLWidget* gl_widget = new QOpenGLWidget();
+  setViewport(gl_widget);
   setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -146,6 +150,11 @@ void VisualisationContainer::AddQualityMenuItem(const QString& name, int value,
   connect(action, &QAction::triggered, [this, value]() { SetQuality(value); });
 }
 
+uint32_t VisualisationContainer::CurrentFramebufferObject() const {
+  QOpenGLContext* context = QOpenGLContext::currentContext();
+  return context ? context->defaultFramebufferObject() : 0;
+}
+
 void VisualisationContainer::SetEngine(GstEngine* engine) {
   engine_ = engine;
 
@@ -155,7 +164,8 @@ void VisualisationContainer::SetEngine(GstEngine* engine) {
 void VisualisationContainer::showEvent(QShowEvent* e) {
   qLog(Debug) << "Showing visualization";
   if (!initialised_) {
-    if (!QGLFormat::hasOpenGL()) {
+    QOpenGLContext test_context;
+    if (!test_context.create()) {
       hide();
       QMessageBox::warning(this, tr("Clementine Visualization"),
                            tr("Your system is missing OpenGL support, "
@@ -163,8 +173,10 @@ void VisualisationContainer::showEvent(QShowEvent* e) {
                            QMessageBox::Close);
       return;
     }
-    Init();
+    // Set before Init(): its setViewport() call re-enters showEvent(), and a
+    // second Init() would delete the viewport the first is still using.
     initialised_ = true;
+    Init();
   }
 
   QGraphicsView::showEvent(e);
@@ -234,7 +246,7 @@ void VisualisationContainer::ChangeOverlayOpacity(qreal value) {
     viewport()->unsetCursor();
 }
 
-void VisualisationContainer::enterEvent(QEvent* e) {
+void VisualisationContainer::enterEvent(QEnterEvent* e) {
   QGraphicsView::enterEvent(e);
   overlay_->SetVisible(true);
 }

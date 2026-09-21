@@ -1,4 +1,4 @@
-cmake_minimum_required( VERSION 3.0.0 FATAL_ERROR )
+cmake_minimum_required( VERSION 3.16.0 FATAL_ERROR)
 
 set( CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules)
 set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DQT_NO_CAST_FROM_ASCII -DQT_NO_CAST_TO_ASCII" )
@@ -6,7 +6,7 @@ set( CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DQT_NO_CAST_FROM_ASCII -DQT_NO_CAST_TO
 set(MYGPO_QT_VERSION_SUFFIX 5)
 
 macro(qt_wrap_cpp)
-    qt5_wrap_cpp(${ARGN})
+    qt6_wrap_cpp(${ARGN})
 endmacro()
 
 # pkg-config names of QtCore and QtNetwork are Qt5Core and Qt5Network for

@@ -33,8 +33,6 @@
 #cmakedefine HAVE_GIO
 #cmakedefine HAVE_GOOGLE_DRIVE
 #cmakedefine HAVE_LIBGPOD
-#cmakedefine HAVE_LIBLASTFM
-#cmakedefine HAVE_LIBLASTFM1
 #cmakedefine HAVE_LIBMTP
 #cmakedefine HAVE_LIBPULSE
 #cmakedefine HAVE_ALSA
@@ -50,7 +48,6 @@
 #cmakedefine HAVE_SPOTIFY
 #cmakedefine TAGLIB_HAS_OPUS
 #cmakedefine USE_INSTALL_PREFIX
-#cmakedefine USE_SYSTEM_PROJECTM
 #cmakedefine USE_SYSTEM_SHA2
 #cmakedefine USE_BUNDLE
 

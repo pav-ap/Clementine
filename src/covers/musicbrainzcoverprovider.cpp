@@ -21,12 +21,9 @@
 #include <QUrlQuery>
 #include <QXmlStreamReader>
 #include <algorithm>
-#include <functional>
 
 #include "core/closure.h"
 #include "core/network.h"
-
-using std::mem_fun;
 
 namespace {
 
@@ -69,8 +66,9 @@ void MusicbrainzCoverProvider::ReleaseSearchFinished(QNetworkReply* reply,
   QXmlStreamReader reader(reply);
   while (!reader.atEnd()) {
     QXmlStreamReader::TokenType type = reader.readNext();
-    if (type == QXmlStreamReader::StartElement && reader.name() == "release") {
-      QStringRef release_id = reader.attributes().value("id");
+    if (type == QXmlStreamReader::StartElement &&
+        reader.name() == QLatin1String("release")) {
+      QStringView release_id = reader.attributes().value("id");
       if (!release_id.isEmpty()) {
         releases.append(release_id.toString());
       }
@@ -88,8 +86,9 @@ void MusicbrainzCoverProvider::ReleaseSearchFinished(QNetworkReply* reply,
 
 void MusicbrainzCoverProvider::ImageCheckFinished(int id) {
   QList<QNetworkReply*> replies = image_checks_.values(id);
-  int finished_count = std::count_if(replies.constBegin(), replies.constEnd(),
-                                     mem_fun(&QNetworkReply::isFinished));
+  int finished_count =
+      std::count_if(replies.constBegin(), replies.constEnd(),
+                    [](QNetworkReply* reply) { return reply->isFinished(); });
   if (finished_count == replies.size()) {
     QString cover_name = cover_names_.take(id);
     QList<CoverSearchResult> results;
