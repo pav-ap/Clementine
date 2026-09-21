@@ -100,6 +100,6 @@ void SongPathParser::GuessAlbum(const QString& path, Song* song) {
 void SongPathParser::GuessMissingFields(Song* song, QString path) {
   if (guess_metadata_) {
     GuessArtistAndTitle(song);
-    GuessAlbum(path, song);
+    /*GuessAlbum(path, song);*/
   }
 }
