@@ -80,6 +80,7 @@
 #include "library/libraryfilterwidget.h"
 #include "library/libraryviewcontainer.h"
 #include "musicbrainz/tagfetcher.h"
+#include "plantag/plantagclient.h"
 #include "networkremote/networkremote.h"
 #include "playlist/playlist.h"
 #include "playlist/playlistbackend.h"
@@ -104,6 +105,7 @@
 #include "ui/about.h"
 #include "ui/addstreamdialog.h"
 #include "ui/albumcovermanager.h"
+#include "ui/bpmfetchdialog.h"
 #include "ui/console.h"
 #include "ui/edittagdialog.h"
 #include "ui/equalizer.h"
@@ -723,6 +725,9 @@ MainWindow::MainWindow(Application* app, SystemTrayIcon* tray_icon, OSD* osd,
   playlist_menu_->addAction(ui_->action_renumber_tracks);
   playlist_menu_->addAction(ui_->action_selection_set_value);
   playlist_menu_->addAction(ui_->action_auto_complete_tags);
+  playlist_fetch_bpm_ = playlist_menu_->addAction(
+      IconLoader::Load("edit-find", IconLoader::Base),
+      tr("Fetch BPM from internet..."), this, SLOT(PlaylistFetchBpm()));
   playlist_menu_->addAction(ui_->action_add_files_to_transcoder);
   playlist_menu_->addSeparator();
   playlist_copy_to_library_ = playlist_menu_->addAction(
@@ -2945,6 +2950,87 @@ void MainWindow::AutoCompleteTagsAccepted() {
 
   // This is really lame but we don't know what rows have changed
   ui_->playlist->view()->update();
+}
+
+void MainWindow::PlaylistFetchBpm() {
+  SongList songs;
+  bpm_fetch_items_.clear();
+
+  for (const QModelIndex& index :
+       ui_->playlist->view()->selectionModel()->selection().indexes()) {
+    if (index.column() != 0) continue;
+    const int row =
+        app_->playlist_manager()->current()->proxy()->mapToSource(index).row();
+    PlaylistItemPtr item(app_->playlist_manager()->current()->item_at(row));
+    const Song song = item->Metadata();
+
+    // Only local files can be tagged; streams and remote items have no file.
+    if (song.IsEditable() && !song.url().toLocalFile().isEmpty()) {
+      songs << song;
+      bpm_fetch_items_ << item;
+    }
+  }
+
+  if (songs.isEmpty()) {
+    QMessageBox::information(this, tr("Fetch BPM"),
+                             tr("Select some local tracks first."));
+    return;
+  }
+
+  if (!plantag_client_) {
+    plantag_client_.reset(new PlantagClient);
+    plantag_client_->SetBinaryPath(QSettings().value("plantag/binary").toString());
+    // Credentials live in QSettings (or the environment) and are handed to the
+    // child process through its environment, never through argv — argv is
+    // visible to every user on the machine via ps.
+    plantag_client_->SetSpotifyCredentials(
+        QSettings().value("plantag/spotify_client_id").toString(),
+        QSettings().value("plantag/spotify_client_secret").toString());
+
+    bpm_fetch_dialog_.reset(new BpmFetchDialog(this));
+
+    connect(plantag_client_.get(), &PlantagClient::Finished, this,
+            [this](const QList<PlantagClient::FileResult>& results) {
+              bpm_fetch_dialog_->SetResults(results);
+              bpm_fetch_dialog_->show();
+              bpm_fetch_dialog_->raise();
+            });
+    connect(plantag_client_.get(), &PlantagClient::Failed, this,
+            [this](const QString& message) {
+              QMessageBox::warning(this, tr("Fetch BPM"), message);
+            });
+    connect(plantag_client_.get(), &PlantagClient::Applied, this,
+            [this](int succeeded, int failed) {
+              // plantag writes the files directly, so the playlist items need
+              // re-reading before the new BPM shows up.
+              for (PlaylistItemPtr item : bpm_fetch_items_) {
+                item->Reload();
+              }
+              ui_->playlist->view()->update();
+              if (failed > 0) {
+                QMessageBox::warning(
+                    this, tr("Fetch BPM"),
+                    tr("Updated %1 file(s); %2 could not be written.")
+                        .arg(succeeded)
+                        .arg(failed));
+              }
+            });
+    connect(bpm_fetch_dialog_.get(), &BpmFetchDialog::PicksAccepted, this,
+            SLOT(BpmFetchAccepted()));
+  }
+
+  plantag_client_->Identify(songs);
+}
+
+void MainWindow::BpmFetchAccepted() {
+  if (!plantag_client_) return;
+
+  const QHash<QString, QString> picks = bpm_fetch_dialog_->Picks();
+  if (picks.isEmpty()) return;
+
+  // --pick applies exactly these choices; without it the tool would re-run its
+  // own ranking and could discard what the user just decided.
+  plantag_client_->ApplyPicks(picks);
 }
 
 QPixmap MainWindow::CreateOverlayedIcon(int position, int scrobble_point) {

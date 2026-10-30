@@ -78,6 +78,8 @@ class SongInfoView;
 class StreamDetailsDialog;
 class SystemTrayIcon;
 class TagFetcher;
+class PlantagClient;
+class BpmFetchDialog;
 class TaskManager;
 class TrackSelectionDialog;
 class TranscodeDialog;
@@ -183,6 +185,10 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   void EditValue();
   void AutoCompleteTags();
   void AutoCompleteTagsAccepted();
+  // Fetch BPM/ISRC/Spotify ids for the selected tracks via the external
+  // plantag tool, then let the user resolve any ambiguous matches.
+  void PlaylistFetchBpm();
+  void BpmFetchAccepted();
   void PlaylistUndoRedoChanged(QAction* undo, QAction* redo);
   void AddFilesToTranscoder();
 
@@ -347,6 +353,12 @@ class MainWindow : public QMainWindow, public PlatformInterface {
   std::unique_ptr<TagFetcher> tag_fetcher_;
   std::unique_ptr<TrackSelectionDialog> track_selection_dialog_;
   PlaylistItemList autocomplete_tag_items_;
+  std::unique_ptr<PlantagClient> plantag_client_;
+  std::unique_ptr<BpmFetchDialog> bpm_fetch_dialog_;
+  // Items whose tags are being updated, kept so they can be reloaded after
+  // plantag writes the files.
+  PlaylistItemList bpm_fetch_items_;
+  QAction* playlist_fetch_bpm_;
 
 #ifdef HAVE_VISUALISATIONS
   std::unique_ptr<VisualisationContainer> visualisation_;

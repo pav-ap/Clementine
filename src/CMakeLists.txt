@@ -331,6 +331,7 @@ set(SOURCES
   songinfo/songplaystats.cpp
   songinfo/spotifyimages.cpp
   songinfo/streamdiscoverer.cpp
+  plantag/plantagclient.cpp
   songinfo/taglyricsinfoprovider.cpp
   songinfo/ultimatelyricslyric.cpp
   songinfo/ultimatelyricsprovider.cpp
@@ -364,6 +365,7 @@ set(SOURCES
   ui/behavioursettingspage.cpp
   ui/console.cpp
   ui/coverfromurldialog.cpp
+  ui/bpmfetchdialog.cpp
   ui/edittagdialog.cpp
   ui/lovedialog.cpp
   ui/equalizer.cpp
@@ -642,6 +644,7 @@ set(HEADERS
   songinfo/songplaystats.h
   songinfo/spotifyimages.h
   songinfo/streamdiscoverer.h
+  plantag/plantagclient.h
   songinfo/taglyricsinfoprovider.h
   songinfo/ultimatelyricslyric.h
   songinfo/ultimatelyricsprovider.h
@@ -668,6 +671,7 @@ set(HEADERS
   ui/behavioursettingspage.h
   ui/console.h
   ui/coverfromurldialog.h
+  ui/bpmfetchdialog.h
   ui/edittagdialog.h
   ui/filechooserwidget.h
   ui/lovedialog.h
