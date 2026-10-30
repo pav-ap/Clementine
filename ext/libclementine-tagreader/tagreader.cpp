@@ -413,6 +413,23 @@ void TagReader::ReadFile(const QString& filename,
         disc = TStringToQString(TagLib::String::number(item.toIntPair().first));
       }
 
+      // Tempo. Nothing read "tmpo" before this, so BPM was silently dropped
+      // for every M4A file even when the tag was present.
+      //
+      // TagLib stores tmpo as a plain integer, but Clementine's own writer used
+      // to emit it as a string list (see SaveFile) and other taggers have done
+      // the same, so accept either form rather than lose the value again.
+      item = mp4_tag->item("tmpo");
+      if (item.isValid()) {
+        int tempo = item.toInt();
+        if (tempo <= 0) {
+          tempo = item.toIntPair().first;
+        }
+        if (tempo > 0) {
+          song->set_bpm(tempo);
+        }
+      }
+
       item = mp4_tag->item(kMP4_FMPS_Rating_ID);
       if (item.isValid()) {
         float rating =
@@ -882,17 +899,26 @@ bool TagReader::SaveFile(const QString& filename,
   } else if (TagLib::MP4::File* file =
                  dynamic_cast<TagLib::MP4::File*>(fileref->file())) {
     TagLib::MP4::Tag* tag = file->tag();
-    tag->setItem("disk",
-                 TagLib::MP4::Item(song.disc() <= 0 - 1 ? 0 : song.disc(), 0));
-    tag->setItem("tmpo",
-                 TagLib::StringList(song.bpm() <= 0 - 1
-                                        ? "0"
-                                        : TagLib::String::number(song.bpm())));
+    tag->setItem(
+        "disk",
+        TagLib::MP4::Item(song.disc() <= 0 - 1 ? 0 : song.disc(), 0));
+    // tmpo is an integer atom in MP4. This used to be written as a string list,
+    // which is malformed: players ignored it, so a BPM set in Clementine never
+    // round-tripped back on the next read.
+    tag->setItem(
+        "tmpo",
+        TagLib::MP4::Item(song.bpm() <= 0 - 1
+                              ? 0
+                              : static_cast<int>(song.bpm() + 0.5f)));
     tag->setItem("\251wrt", TagLib::StringList(song.composer().c_str()));
     tag->setItem("\251grp", TagLib::StringList(song.grouping().c_str()));
     tag->setItem("\251lyr", TagLib::StringList(song.lyrics().c_str()));
     tag->setItem("aART", TagLib::StringList(song.albumartist().c_str()));
-    tag->setItem("cpil", TagLib::StringList(song.compilation() ? "1" : "0"));
+    // cpil is a boolean atom, not a string. Writing "1"/"0" as a string list
+    // produced a malformed atom that other players ignore. (Note: nothing in
+    // Clementine reads cpil back yet, so compilation still won't display from
+    // MP4 files — that's a separate gap.)
+    tag->setItem("cpil", TagLib::MP4::Item(song.compilation()));
   } else if (TagLib::APE::File* file =
                  dynamic_cast<TagLib::APE::File*>(fileref->file())) {
     saveApeTag(file->APETag(true));
